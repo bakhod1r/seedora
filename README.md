@@ -95,6 +95,8 @@ Variable expansion is deliberately not applied to the DSN. A password is not she
 
 Seedora introspects the live schema: tables, columns, data types, nullability, defaults, primary keys, unique constraints, enums, and foreign keys. Views, generated columns, and partitions of a partitioned table are read but never seeded — none of them is a thing you insert rows into.
 
+Dragging one column onto another points the first at the second — a mapping change, filled from the parent's keys at run time. Dragging a key onto another table's **card** asks which relationship it is — one-to-many, one-to-one, or many-to-many — and then adds what that answer needs: a foreign key column (`users.id` dropped on `orders` proposes `orders.user_id REFERENCES users(id)`), the same column with a unique constraint, or a join table holding one key from each side as its composite primary key, and drawing between two existing columns offers to add the database's own constraint. Both are schema changes and both go through the SQL dialog first; SQLite has no `ALTER TABLE ADD CONSTRAINT`, so there the constraint is refused with the reason and the mapping still works.
+
 Reading a schema from `.sql` files instead of a live database works too, which is what `--migrations` is for:
 
 ```bash
@@ -222,6 +224,10 @@ Measured on an M-series laptop, two tables, nine and five columns, one foreign k
 | SQLite, pure-Go driver | ~24,000 |
 
 Generation is roughly an order of magnitude faster than the fastest database can accept rows, which is the intended shape: the bottleneck should be the engine, not us.
+
+Clicking a relationship's cardinality marker asks what it should be — one-to-many or one-to-one — and changes it. One-to-one is a mapping change first: the seeder gives each parent exactly one child, and a run asking for more children than there are parents is refused with the arithmetic. It then offers the unique index that makes the database enforce it.
+
+A join table seeds like any other: its key pairs are assigned from the parent pools rather than drawn, so they are distinct by construction and spread over the parents, and a run asking for more rows than there are possible pairs is refused before it writes anything.
 
 Dropping non-essential indexes before a large run and rebuilding afterwards still helps, and Seedora does not yet detect or suggest it.
 

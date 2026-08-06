@@ -662,12 +662,6 @@ func restoreOrder(p *plan.Plan, s *model.Schema) {
 	}
 }
 
-func restorePlanAgainst(p *plan.Plan, s *model.Schema) {
-	if p != nil && s != nil {
-		restoreOrder(p, s)
-	}
-}
-
 // Close releases the database connection.
 func (s *Server) Close(ctx context.Context) error {
 	s.mu.Lock()

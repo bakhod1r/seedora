@@ -91,8 +91,24 @@ gaps below.
   of what it is joined to, with overlaps separated after each pass. Measured on
   the demo schema: mean vertical distance between related tables fell from 447
   to 242, mean edge length from 819 to 696, no overlaps.
-- **Direct manipulation.** Drag a column to reorder it within its table, or onto
-  another table's column to point it there (a mapping change, not a migration).
+- **Direct manipulation.** Drag a column to reorder it within its table, onto
+  another table's column to point it there (a mapping change), or onto another
+  table's card to add the foreign key column that table does not have yet (a
+  schema change, reviewed as SQL). Direction is the schema's, not the mouse's:
+  a primary key dropped on a plain column makes the plain column the child.
+  Dropping on a card asks the cardinality first — one-to-many, one-to-one, or
+  many-to-many — because those are three different schemas and guessing wrong
+  is a migration somebody has to write later. Many-to-many produces the join
+  table; `internal/seed/composite.go` is what makes one seedable, by assigning
+  key pairs from the parent pools rather than drawing them. The same file covers
+  a one-to-one — a single unique foreign key — for the same reason: the ordinary
+  uniqueness repair replaces a duplicate with the row index, which on a foreign
+  key is a value pointing at nothing.
+- **The cardinality marker is a control.** Clicking `1:N` or a crow's foot opens
+  the same question and applies the answer: `plan.unique` on the child column,
+  then an optional `add_unique` (`CREATE UNIQUE INDEX`) so the database enforces
+  it. Loosening a constraint the database already has is deliberately not
+  offered — it means dropping an index this tool did not create and cannot name.
   Drag a line to place a waypoint it must route through. Both are remembered per
   database in `localStorage`.
 - Zoom with a rail, the wheel, or the keyboard; fold a table to its header;

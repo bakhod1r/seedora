@@ -10,7 +10,14 @@ it.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Folded cards no longer overlap.** A card's position was computed once and
+  then kept, so it was still the position worked out for the height the card
+  had at the time. Folding or unfolding changes that height, and the diagram
+  ended up with cards written over each other. Positions are now recomputed
+  from the current heights whenever the diagram is laid out, and only a card
+  someone has dragged by hand stays where they put it.
 
 ## [0.3.0] — 2026-08-06
 
@@ -36,9 +43,60 @@ Nothing yet.
 - An example, `examples/mysql-migrations/`: an empty MySQL and a directory of
   `.sql` files, seeded in one command.
 - `make mysql-up`, `make mysql-down`, and `make dev-mysql`, and MySQL in CI.
+- **Relationships drawn onto a table.** Dragging a key onto another table's
+  card — rather than onto one of its columns — proposes the foreign key column
+  that table is missing: `users.id` dropped on `orders` becomes
+  `orders.user_id REFERENCES users(id)`, named, typed from the parent key, and
+  reviewed as SQL before it runs.
+- **Cardinality is asked, not assumed.** Dropping a key on a table asks which
+  relationship it is before anything is proposed: one-to-many (a foreign key
+  column), one-to-one (the same column, unique), or many-to-many (a join table
+  named after both sides, with one key from each as its composite primary key).
+  Each choice says what it will do to the schema.
+- **Join tables seed correctly.** A composite primary key made of foreign keys
+  constrains the pair, not either column, and drawing both at random collides
+  almost immediately. The pairs are now assigned from the parent pools —
+  distinct by construction, spread over the parents, reproducible from the
+  seed — and a plan asking for more rows than there are combinations is
+  refused before anything is written, with the arithmetic in the message.
+- **The cardinality marker is a control.** Clicking the `1:N` label, or either
+  crow's foot, asks what that relationship should be and makes it that. It is a
+  mapping change first — one-to-one means the seeder gives each parent exactly
+  one child — and then offers the unique index that makes the database enforce
+  it (`add_unique`, a `CREATE UNIQUE INDEX`, which all three engines accept on a
+  table that already exists). The line's context menu carries the same item, for
+  the notation that draws no markers.
+- **`add_foreign_key`.** After a relationship is drawn between two columns that
+  both already exist, Seedora offers to add the database's own constraint, as
+  one `ALTER TABLE … ADD FOREIGN KEY`. SQLite refuses it with the reason: there
+  is no ALTER for it, and rebuilding the table is not something a seeding tool
+  should do behind a drag.
+
+### Changed
+
+- Dragging a primary key onto a plain column now points the plain column at the
+  key, not the other way round. A foreign key runs child → parent whichever way
+  the mouse went, and the old behaviour made `users.id` a foreign key.
 
 ### Fixed
 
+- A unique foreign key — a one-to-one — was filled by the ordinary uniqueness
+  repair, which replaces a duplicate with the row's index. On a foreign key that
+  is a value pointing at nothing. Those columns are now assigned distinct parent
+  keys, and a run wanting more children than there are parents is refused with
+  the arithmetic.
+- Postgres introspection missed a column held unique by a `CREATE UNIQUE INDEX`
+  rather than by a `UNIQUE` constraint: pg_constraint knows nothing about the
+  index, and both enforce uniqueness identically. The seeder would generate
+  duplicates and fail at the insert. It reads pg_index too now — which matters
+  more since that is the spelling Seedora itself writes for a one-to-one.
+- The browser's "Failed to fetch" is now the sentence it actually means: the
+  server this page came from has stopped, start it again and reload.
+- `tests` no longer depends on the order its tests run in: the MySQL smoke test
+  built on tables another test created, and dropped none of its own, so CI ran
+  it first and failed. It creates its own schema and cleans up after itself.
+- staticcheck findings: an unused function in `internal/ui`, and a literal
+  `%s` in a config test that hid what the test was checking.
 - A name match that could not fit the column's type is no longer applied. `id
   BIGINT PRIMARY KEY` with no auto-increment matched the name "id", which means
   a UUID nearly everywhere else — on a strict engine that failed mid-run, and on

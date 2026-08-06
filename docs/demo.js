@@ -96,6 +96,11 @@
       case "/api/schema/apply":
         return refuse("Applying schema changes");
 
+      // Scanning a migrations directory reads files off the machine Seedora is
+      // running on. There is no machine here.
+      case "/api/schema/scan":
+        return refuse("Reading a migrations directory");
+
       case "/api/seed":
         return refuse("Seeding");
 

@@ -28,6 +28,7 @@ const app = {
   running: false,
   lastRun: null, // {dry, byTable, at} — what the last run wrote
   layout: {},    // table name -> {x, y}
+  pinned: {},    // table name -> true when a person put it there by hand
   hues: {},      // table name -> hue index
   picker: [],    // the generator list as currently filtered
   pickerAt: -1,  // keyboard cursor into it
@@ -50,11 +51,23 @@ const fmt = (n) => Number(n).toLocaleString();
 // ---------------------------------------------------------------- transport
 
 async function api(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    // fetch throws for a network-level failure, and the browser's own words for
+    // it are "Failed to fetch", which says nothing about what happened. In this
+    // page it means one thing: nothing is listening. That is nearly always a
+    // stopped binary or a page opened from disk rather than from the server.
+    throw new Error(
+      "Seedora is not answering — the server it was serving this page from has stopped. " +
+      "Start it again and reload."
+    );
+  }
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) {
@@ -110,7 +123,7 @@ $("btn-theme").addEventListener("click", () => {
 const askDialog = $("ask-dialog");
 let askResolve = null;
 
-function ask({ title, body, danger, okLabel = "Continue", input = null, alert = null }) {
+function ask({ title, body, danger, okLabel = "Continue", input = null, alert = null, choices = null }) {
   $("ask-title").textContent = title;
   $("ask-body").textContent = body || "";
   $("ask-body").hidden = !body;
@@ -119,13 +132,46 @@ function ask({ title, body, danger, okLabel = "Continue", input = null, alert = 
   alertBox.textContent = alert || "";
   alertBox.hidden = !alert;
 
+  // A question with several answers rather than two. The chosen one is
+  // remembered so OK can settle with it, and clicking a choice twice is the
+  // same as choosing it and pressing OK — the gesture people try first.
+  const choiceBox = $("ask-choices");
+  choiceBox.innerHTML = "";
+  choiceBox.hidden = !choices;
+  let chosen = choices ? choices[0].value : null;
+  if (choices) {
+    for (const c of choices) {
+      const btn = el("button", "ask-choice" + (c.value === chosen ? " on" : ""));
+      btn.type = "button";
+      btn.appendChild(el("span", "mark", c.value === chosen ? "●" : "○"));
+      const body = el("span", "body");
+      body.appendChild(el("span", "name", c.label));
+      if (c.hint) body.appendChild(el("span", "hint", c.hint));
+      btn.appendChild(body);
+      btn.addEventListener("click", () => {
+        if (chosen === c.value) return settleAsk(c.value);
+        chosen = c.value;
+        for (const n of choiceBox.children) {
+          const on = n === btn;
+          n.classList.toggle("on", on);
+          n.firstChild.textContent = on ? "●" : "○";
+        }
+      });
+      choiceBox.appendChild(btn);
+    }
+  }
+  askChoice = () => chosen;
+
   const field = $("ask-field");
   const inp = $("ask-input");
   field.hidden = !input;
   if (input) {
     $("ask-label").textContent = input.label || "";
     inp.type = input.type || "text";
-    inp.value = "";
+    // Prefilled when the caller has a sensible answer already, so the common
+    // case is one keystroke rather than typing a name that was on screen.
+    inp.value = input.value || "";
+    if (input.value) requestAnimationFrame(() => inp.select());
   }
 
   const ok = $("ask-ok");
@@ -141,6 +187,8 @@ function ask({ title, body, danger, okLabel = "Continue", input = null, alert = 
   });
 }
 
+let askChoice = () => null;
+
 function settleAsk(value) {
   const resolve = askResolve;
   askResolve = null;
@@ -148,9 +196,10 @@ function settleAsk(value) {
   if (resolve) resolve(value);
 }
 
-$("ask-ok").addEventListener("click", () =>
-  settleAsk($("ask-field").hidden ? true : $("ask-input").value)
-);
+$("ask-ok").addEventListener("click", () => {
+  if (!$("ask-choices").hidden) return settleAsk(askChoice());
+  settleAsk($("ask-field").hidden ? true : $("ask-input").value);
+});
 $("ask-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
@@ -255,6 +304,7 @@ function renderDiagram() {
   host.innerHTML = "";
 
   loadLayout();
+  loadPinned();
   loadHues();
   loadZoom();
   loadCollapsed();
@@ -357,6 +407,8 @@ function tableCard(t, tp) {
   });
   card.appendChild(head);
   makeDraggable(card, head, t.name);
+
+  makeRelationTarget(card, t);
 
   const editing = app.editing.has(t.name);
   if (droppingTable(t.name)) card.classList.add("dropping");
@@ -519,7 +571,7 @@ function makeColumnSortable(row, t, tp) {
     row.classList.remove("drop-link");
 
     if (dragging.table !== t.name) {
-      relateColumns(dragging.table, dragging.column, t.name, row.dataset.column);
+      dropOnColumn(dragging.table, dragging.column, t.name, row.dataset.column);
       return;
     }
     const box = row.getBoundingClientRect();
@@ -529,6 +581,245 @@ function makeColumnSortable(row, t, tp) {
 }
 
 let dragging = null;
+
+const isPK = (table, column) => {
+  const t = app.schema.tables.find((x) => x.name === table);
+  return !!t && (t.primary_key || []).includes(column);
+};
+
+// dropOnColumn decides which end of a dragged relationship is the child.
+//
+// A foreign key always runs child → parent, and which is which is not the
+// direction of the gesture: dragging `users.id` onto `orders.user_id` and
+// dragging `orders.user_id` onto `users.id` mean the same relationship, and the
+// key belongs on orders both times. A primary key is never itself a foreign
+// key, so when one end is a key and the other is not, the answer is the schema's
+// rather than the mouse's.
+function dropOnColumn(fromTable, fromColumn, toTable, toColumn) {
+  if (fromTable === toTable) return;
+
+  let child = { table: fromTable, column: fromColumn };
+  let parent = { table: toTable, column: toColumn };
+  if (isPK(fromTable, fromColumn) && !isPK(toTable, toColumn)) {
+    child = { table: toTable, column: toColumn };
+    parent = { table: fromTable, column: fromColumn };
+  }
+  relateColumns(child.table, child.column, parent.table, parent.column);
+}
+
+// makeRelationTarget lets a column be dropped on another table's card rather
+// than on one of its columns, which means "this table needs a key pointing at
+// mine".
+//
+// Dropping on a column relates two things that both already exist. Dropping on
+// the card is the case where the child column does not exist yet — the ordinary
+// way a relationship is added to a schema — so it adds one. That is a real
+// schema change and goes through the same SQL dialog as every other one.
+function makeRelationTarget(card, t) {
+  card.addEventListener("dragover", (e) => {
+    if (!dragging || dragging.table === t.name) return;
+    // A drop meant for a column row is handled there; this only claims the
+    // space between and around them.
+    if (e.target.closest(".col")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "link";
+    card.classList.add("drop-link");
+  });
+
+  card.addEventListener("dragleave", (e) => {
+    if (e.target === card) card.classList.remove("drop-link");
+  });
+
+  card.addEventListener("drop", (e) => {
+    if (!dragging || dragging.table === t.name) return;
+    if (e.target.closest(".col")) return;
+    e.preventDefault();
+    card.classList.remove("drop-link");
+    addRelationColumn(dragging.table, dragging.column, t.name);
+  });
+}
+
+// addRelationColumn adds the relationship a key dropped on a table describes.
+//
+// Which relationship is a question, not a default. A foreign key column on the
+// child is one-to-many; the same column with a unique constraint is one-to-one;
+// many-to-many is neither, and is a third table holding both keys. Those are
+// three different schemas, and guessing wrong here is a table somebody has to
+// migrate later — so it is asked, once, with what each one means.
+async function addRelationColumn(parentTable, parentColumn, childTable) {
+  const parent = app.schema.tables.find((x) => x.name === parentTable);
+  const source = parent && parent.columns.find((c) => c.name === parentColumn);
+  if (!source) return;
+
+  // Pointing at a column that is not unique is legal and gives every child row
+  // a parent chosen from duplicates, which is nearly never what was meant. The
+  // engine refuses it outright once a real constraint is involved.
+  if (!isPK(parentTable, parentColumn) && !source.unique) {
+    await ask({
+      title: `${parentTable}.${parentColumn} cannot be referenced`,
+      body: "A foreign key can only point at a primary key or a unique column. " +
+        "Drag the key column itself, or make this one unique first.",
+      okLabel: "Close",
+    });
+    return;
+  }
+
+  const child = app.schema.tables.find((x) => x.name === childTable);
+  if (!child) return;
+
+  const kind = await ask({
+    title: `How are ${parentTable} and ${childTable} related?`,
+    body: `Each ${singular(childTable)} points at ${singular(parentTable)} — the question is how many go the other way.`,
+    okLabel: "Continue",
+    choices: [
+      {
+        value: "many",
+        label: `One ${singular(parentTable)} — many ${childTable}`,
+        hint: `A ${fkColumnName(parentTable, parentColumn, child)} column on ${childTable}. The usual case.`,
+      },
+      {
+        value: "one",
+        label: `One ${singular(parentTable)} — one ${singular(childTable)}`,
+        hint: `The same column, unique, so no two ${childTable} share a ${singular(parentTable)}.`,
+      },
+      {
+        value: "manyToMany",
+        label: `Many ${parentTable} — many ${childTable}`,
+        hint: `Neither table can hold this: a third table, ${joinTableName(parentTable, childTable)}, holds both keys.`,
+      },
+    ],
+  });
+  if (!kind) return;
+
+  if (kind === "manyToMany") return addJoinTable(parentTable, childTable);
+
+  // SQLite cannot add a unique column to a table that exists — the constraint
+  // is an index it will not create through ALTER. Saying so before the name is
+  // typed beats a validation error after it.
+  if (kind === "one" && isSQLite()) {
+    await ask({
+      title: "SQLite cannot add a unique column to an existing table",
+      body: `Add the column as one-to-many and create a unique index on ${childTable} separately, ` +
+        "or recreate the table with the column unique.",
+      okLabel: "Close",
+    });
+    return;
+  }
+
+  const suggested = fkColumnName(parentTable, parentColumn, child);
+  const name = await ask({
+    title: `Add ${childTable}.${suggested} → ${parentTable}.${parentColumn}?`,
+    body: `A new column on ${childTable}, pointing at ${parentTable}.${parentColumn}` +
+      (kind === "one" ? ", unique." : ".") + " Nothing runs until you apply the SQL.",
+    okLabel: "Add column",
+    input: { label: "Column name", value: suggested },
+  });
+  if (name === null) return;
+
+  const column = String(name).trim() || suggested;
+  if (child.columns.some((c) => c.name === column)) {
+    toast(`${childTable} already has a column named ${column}`, "bad");
+    return;
+  }
+
+  app.pending.push({
+    kind: "add_column",
+    table: childTable,
+    columns: [{
+      name: column,
+      type: fkType(source),
+      // A table that already has rows cannot take a NOT NULL column without a
+      // default, and there is no sensible default for a key.
+      nullable: true,
+      pk: false,
+      unique: kind === "one",
+      references: `${parentTable}.${parentColumn}`,
+    }],
+  });
+  renderDiagram();
+  reviewSchema();
+}
+
+// addJoinTable builds the third table a many-to-many needs: one key per side,
+// both of them the primary key, so the same pair cannot be recorded twice.
+async function addJoinTable(a, b) {
+  const ta = app.schema.tables.find((t) => t.name === a);
+  const tb = app.schema.tables.find((t) => t.name === b);
+  const ka = ta && (ta.primary_key || [])[0];
+  const kb = tb && (tb.primary_key || [])[0];
+  if (!ka || !kb) {
+    await ask({
+      title: "Both tables need a single-column primary key",
+      body: "A join table is made of one key from each side, and there is nothing to point at otherwise.",
+      okLabel: "Close",
+    });
+    return;
+  }
+
+  const suggested = joinTableName(a, b);
+  const name = await ask({
+    title: `Add ${suggested}?`,
+    body: `A new table with ${singular(a)}_${ka} and ${singular(b)}_${kb}, ` +
+      "both of them its primary key so the same pair cannot appear twice.",
+    okLabel: "Add table",
+    input: { label: "Table name", value: suggested },
+  });
+  if (name === null) return;
+
+  const table = String(name).trim() || suggested;
+  if (app.schema.tables.some((t) => t.name === table) ||
+      app.drafts.some((d) => d.table === table)) {
+    toast(`${table} already exists`, "bad");
+    return;
+  }
+
+  const colA = ta.columns.find((c) => c.name === ka);
+  const colB = tb.columns.find((c) => c.name === kb);
+  app.drafts.push({
+    table,
+    columns: [
+      { name: `${singular(a)}_${ka}`, type: fkType(colA), pk: true, nullable: false,
+        references: `${a}.${ka}` },
+      { name: `${singular(b)}_${kb}`, type: fkType(colB), pk: true, nullable: false,
+        references: `${b}.${kb}` },
+    ],
+  });
+  if (!app.layout[table]) app.layout[table] = draftSpot();
+  saveLayout();
+  renderDiagram();
+  reviewSchema();
+}
+
+// singular is the English guess, and it is only ever a suggested name the user
+// can overwrite in the dialog.
+const singular = (name) => name.replace(/ies$/, "y").replace(/([^s])s$/, "$1");
+
+// joinTableName is the convention both Rails and Django settle on: the two
+// table names, alphabetical, joined by an underscore.
+const joinTableName = (a, b) => [a, b].sort().join("_");
+
+// fkType is the parent key's type with the auto-assignment taken off: a child
+// column must hold the same values, and must not generate its own.
+function fkType(source) {
+  const native = (source.native || source.type || "").trim();
+  const bare = native.replace(/\s*(auto_increment|generated\s+(by\s+default|always)\s+as\s+identity)/gi, "").trim();
+  const lower = bare.toLowerCase();
+  if (lower === "bigserial") return "bigint";
+  if (lower === "serial") return "integer";
+  if (lower === "smallserial") return "smallint";
+  return bare || "integer";
+}
+
+// fkColumnName proposes `user_id` for `users.id`, and falls back to something
+// unambiguous when that name is taken.
+function fkColumnName(parentTable, parentColumn, child) {
+  let name = `${singular(parentTable)}_${parentColumn}`;
+  if (!child.columns.some((c) => c.name === name)) return name;
+  name = `${parentTable}_${parentColumn}`;
+  let n = 2;
+  while (child.columns.some((c) => c.name === name)) name = `${parentTable}_${parentColumn}_${n++}`;
+  return name;
+}
 
 // relateColumns points a child column at a parent column, which is what
 // dragging one onto the other means.
@@ -572,7 +863,53 @@ async function relateColumns(childTable, childColumn, parentTable, parentColumn)
   // Light up what was just joined, because the whole point of drawing it was to
   // see it.
   setFocus(childTable);
-  toast(`${childTable}.${childColumn} now points at ${parentTable}.${parentColumn}`, "good");
+  // Which relationship this is, in the same words the drop-on-a-card dialog
+  // uses: a unique child column is one-to-one, anything else is one-to-many.
+  const one = cp.unique || isPK(childTable, childColumn) ||
+    ((app.schema.tables.find((t) => t.name === childTable) || {}).columns || [])
+      .some((c) => c.name === childColumn && c.unique);
+  toast(`${childTable}.${childColumn} now points at ${parentTable}.${parentColumn}` +
+    ` · one ${singular(parentTable)} — ${one ? "one " + singular(childTable) : "many " + childTable}`, "good");
+
+  await offerConstraint(childTable, childColumn, parentTable, parentColumn, target);
+}
+
+// offerConstraint asks whether the database should enforce the relationship
+// that was just drawn.
+//
+// Drawing one is a mapping change and stays one: a diagram that issued ALTER
+// TABLE because something was dragged would be a trap. But the reason to draw
+// it is usually that the schema is missing the key, so the question is worth
+// asking once — and the answer goes through the SQL dialog like every other
+// schema change.
+async function offerConstraint(childTable, childColumn, parentTable, parentColumn, target) {
+  if (isSQLite()) return; // No ALTER TABLE ADD CONSTRAINT there at all.
+
+  const child = app.schema.tables.find((t) => t.name === childTable);
+  const col = child && child.columns.find((c) => c.name === childColumn);
+  if (!col || col.fk) return; // The database already enforces it.
+
+  const parentIsKey = isPK(parentTable, parentColumn) || (target && target.unique);
+  if (!parentIsKey) return; // The engine would refuse the constraint.
+
+  const ok = await ask({
+    title: "Add the foreign key to the database too?",
+    body: `The mapping now fills ${childTable}.${childColumn} from ` +
+      `${parentTable}.${parentColumn}. The database does not enforce it — ` +
+      "adding the constraint makes it a real relationship, and existing rows " +
+      "that break it will make the statement fail.",
+    okLabel: "Add constraint",
+  });
+  if (!ok) return;
+
+  app.pending.push({
+    kind: "add_foreign_key",
+    table: childTable,
+    column: childColumn,
+    references: `${parentTable}.${parentColumn}`,
+  });
+  renderDiagram();
+  reviewSchema();
 }
 
 function moveColumn(t, tp, column, target, above) {
@@ -755,8 +1092,25 @@ function loadLayout() {
 function saveLayout() {
   try {
     localStorage.setItem(layoutKey(), JSON.stringify(app.layout));
+    localStorage.setItem(pinnedKey(), JSON.stringify(app.pinned));
   } catch {
     // A full or disabled storage costs the saved arrangement and nothing else.
+  }
+}
+
+// A position is remembered for every card, but only a dragged card is pinned.
+// The distinction is what folding needs: a folded card is short and an unfolded
+// one is tall, so a position computed at one height is wrong at the other. Every
+// unpinned card is therefore laid out again whenever the heights change, and a
+// card someone placed by hand stays where they put it.
+const pinnedKey = () =>
+  "seedora:pinned:" + (app.state && app.state.target ? app.state.target : "?");
+
+function loadPinned() {
+  try {
+    app.pinned = JSON.parse(localStorage.getItem(pinnedKey())) || {};
+  } catch {
+    app.pinned = {};
   }
 }
 
@@ -896,7 +1250,9 @@ function autoLayout() {
       bottom = Math.max(bottom, n.y + n.h);
     }
     for (const n of nodes.values()) {
-      if (!app.layout[n.name]) {
+      // Recomputed rather than kept, because the heights it was computed from
+      // change every time a card is folded or unfolded.
+      if (!n.fixed) {
         app.layout[n.name] = { x: n.x, y: Math.max(0, n.y - top + offsetY) };
       }
     }
@@ -918,9 +1274,10 @@ function buildNodes(group) {
       x: 0,
       y: 0,
       h: card ? card.offsetHeight : 200,
-      // A card someone has dragged is an anchor: the relaxation arranges the
-      // rest around it rather than undoing the decision.
-      fixed: !!app.layout[name],
+      // A card someone has dragged, or a draft they dropped on the canvas, is
+      // an anchor: the relaxation arranges the rest around it rather than
+      // undoing the decision.
+      fixed: !!app.pinned[name] || app.drafts.some((d) => d.table === name),
       links: new Set(),
     });
   }
@@ -938,7 +1295,7 @@ function buildNodes(group) {
 
   for (const n of nodes.values()) {
     n.x = n.depth * (CARD_W + GAP_X);
-    if (n.fixed) {
+    if (n.fixed && app.layout[n.name]) {
       n.x = app.layout[n.name].x;
       n.y = app.layout[n.name].y;
     }
@@ -1099,6 +1456,7 @@ function makeDraggable(card, head, name) {
     const x = Math.max(0, originX + fromScreen(e.clientX - startX));
     const y = Math.max(0, originY + fromScreen(e.clientY - startY));
     app.layout[name] = { x, y };
+    app.pinned[name] = true;
     card.style.left = x + "px";
     card.style.top = y + "px";
     drawEdges();
@@ -1120,6 +1478,7 @@ function makeDraggable(card, head, name) {
 function resetLayout() {
   rearrange(() => {
     app.layout = {};
+    app.pinned = {};
     saveLayout();
     placeCards();
     drawEdges();
@@ -1884,15 +2243,15 @@ function lanes(boxes, from, to) {
 // crosses a card is a question with an exact answer, and a router that reasons
 // about it instead of checking gets it right most of the time — which on a
 // canvas of twenty-three cards means several lines under several cards.
-function routeAround(x1, y1, x2, y2, boxes, from, to, key) {
+function routeAround(x1, y1, x2, y2, boxes, from, to, key, out1 = 1, out2 = -1) {
   // A hand-placed waypoint wins over anything computed: it was placed to say
   // "not there", and recomputing over the top of it would be an argument.
   const held = app.waypoints[key];
   if (held) return throughWaypoint(x1, y1, x2, y2, held.x, held.y);
 
   const stub = 24;
-  const ax = x1 + stub;   // out of the child's right edge
-  const bx = x2 - stub;   // into the parent's left edge
+  const ax = x1 + out1 * stub;   // out of the side the child was left by
+  const bx = x2 + out2 * stub;   // into the side the parent is entered on
   const start = { x: x1, y: y1 };
   const finish = { x: x2, y: y2 };
 
@@ -2124,10 +2483,28 @@ function marks(a, b, opts) {
     return [
       labelAt(a.x + a.dir * 13, a.y - 9, opts.ends[0], opts.lit),
       labelAt(b.x + b.dir * 13, b.y - 9, opts.ends[1], opts.lit),
-      labelAt(opts.mx, opts.my, opts.label, opts.lit),
+      // The middle label is the relationship itself — 1:N, 1:1, M:N — so it is
+      // also the control that changes it.
+      clickable(labelAt(opts.mx, opts.my, opts.label, opts.lit), opts.key),
     ];
   }
-  return [foot(a, opts), foot(b, opts)];
+  return [clickable(foot(a, opts), opts.key), clickable(foot(b, opts), opts.key)];
+}
+
+// clickable turns a cardinality marker into the control for the relationship it
+// describes: clicking 1:N asks what it should be instead.
+//
+// The marker is the obvious thing to press — it is the picture of the answer —
+// and the alternative was a menu item nobody would find. The line's own menu
+// still carries it, for the notation that draws no markers at all.
+function clickable(node, key) {
+  if (!key) return node;
+  node.classList.add("edge-mark");
+  node.addEventListener("click", (e) => {
+    e.stopPropagation();
+    changeCardinality(key);
+  });
+  return node;
 }
 
 // foot is one crow's-foot terminator: a three-pronged fork for many, a single
@@ -2219,21 +2596,32 @@ function selfEdge(a, b, base, lit, hue, opts) {
   nodes.push(...marks(
     { x, y: y1, dir: 1, many: opts.ends[0] !== "1" },
     { x, y: y2, dir: 1, many: opts.ends[1] !== "1" },
-    { mx, my, hue, lit, ends: opts.ends, label: opts.label },
+    { mx, my, hue, lit, ends: opts.ends, label: opts.label, key: opts.key },
   ));
   return nodes;
 }
 
 function edge(a, b, base, lit, hue, opts) {
-  // Always out of the child's right edge and into the parent's left, the way an
-  // ER diagram is drawn. It costs length when the parent happens to sit to the
-  // left — the line goes back on itself through a corridor — and buys a diagram
-  // where every arrow means the same thing without being read twice.
-  const x1 = fromScreen(a.right - base.left);
+  // Out of the child and into the parent on the sides that face each other.
+  //
+  // This used to be fixed — always the child's right into the parent's left —
+  // so that every arrow meant the same thing without being read twice. It cost
+  // a doubling-back whenever the parent sat to the left, and that route runs
+  // back underneath both cards, where the edge layer sits below them: what is
+  // left visible is a stub at each end and a stray segment in the gap, which
+  // reads as a broken line rather than a long one. Direction is already said
+  // twice over — by the dot at the parent's end and by the crow's foot — so the
+  // sides are free to be chosen for legibility.
+  const flip = (b.left + b.right) / 2 < (a.left + a.right) / 2;
+
+  const x1 = fromScreen((flip ? a.left : a.right) - base.left);
   const y1 = fromScreen(a.top + a.height / 2 - base.top);
-  const x2 = fromScreen(b.left - base.left);
+  const x2 = fromScreen((flip ? b.right : b.left) - base.left);
   const y2 = fromScreen(b.top + b.height / 2 - base.top);
-  const d = routeAround(x1, y1, x2, y2, opts.boxes, opts.from, opts.to, opts.key);
+  // Which way each stub leaves its card: away from it, whichever side it left.
+  const out1 = flip ? -1 : 1;
+  const out2 = -out1;
+  const d = routeAround(x1, y1, x2, y2, opts.boxes, opts.from, opts.to, opts.key, out1, out2);
 
   const path = document.createElementNS(SVG_NS, "path");
   path.setAttribute("class", "edge" + (lit ? " lit" : ""));
@@ -2260,11 +2648,11 @@ function edge(a, b, base, lit, hue, opts) {
   // many, the parent's the one. Drawn once, read both ways.
   const out = [...decorate(path, d, opts), dot];
   out.push(...marks(
-    // The markers point away from the card they sit on, which is now always
-    // the same direction: out of the child's right, into the parent's left.
-    { x: x1, y: y1, dir: 1, many: opts.ends[0] !== "1" },
-    { x: x2, y: y2, dir: -1, many: opts.ends[1] !== "1" },
-    { mx, my, hue, lit, ends: opts.ends, label: opts.label },
+    // The markers point away from the card they sit on, whichever side the
+    // line left it by.
+    { x: x1, y: y1, dir: out1, many: opts.ends[0] !== "1" },
+    { x: x2, y: y2, dir: out2, many: opts.ends[1] !== "1" },
+    { mx, my, hue, lit, ends: opts.ends, label: opts.label, key: opts.key },
   ));
   return out;
 }
@@ -2789,11 +3177,102 @@ function openContextMenu(x, y, items) {
 
 // The three menus, one per thing that can be under the pointer.
 
+// changeCardinality asks what a relationship that already exists should be, and
+// makes it that.
+//
+// One-to-many and one-to-one differ by one fact: whether the child's key may
+// repeat. That is a mapping change first — it decides whether the seeder gives
+// each parent one child or many — and a schema change only if the user wants
+// the database to enforce it, which is the second question.
+//
+// Many-to-many is not offered here. It is not a property of this edge: it is a
+// third table, and turning one relationship into one is a different gesture —
+// drag the key onto the other table's card.
+async function changeCardinality(key) {
+  const [childRef, parentRef] = key.split("→");
+  const childTable = childRef.slice(0, childRef.lastIndexOf("."));
+  const childColumn = childRef.slice(childRef.lastIndexOf(".") + 1);
+  const parentTable = parentRef.slice(0, parentRef.lastIndexOf("."));
+  const parentColumn = parentRef.slice(parentRef.lastIndexOf(".") + 1);
+
+  const tp = app.plan.tables[childTable];
+  const cp = tp && tp.columns[childColumn];
+  if (!cp) return;
+
+  const child = app.schema.tables.find((t) => t.name === childTable);
+  const col = child && child.columns.find((c) => c.name === childColumn);
+  const pk = (child && child.primary_key) || [];
+  // A key the database already constrains cannot be loosened from here: that
+  // means dropping an index this tool did not create and cannot name.
+  const fixed = !!(col && col.unique) || (pk.length === 1 && pk[0] === childColumn);
+
+  const now = cp.unique || fixed ? "one" : "many";
+  const kind = await ask({
+    title: `${parentTable} → ${childTable}`,
+    body: `Every ${singular(childTable)} points at one ${singular(parentTable)}. ` +
+      `The question is how many ${childTable} may point at the same one.`,
+    okLabel: "Apply",
+    choices: [
+      {
+        value: "many",
+        label: `One ${singular(parentTable)} — many ${childTable}`,
+        hint: fixed
+          ? `The database enforces uniqueness on ${childColumn}; drop that index to allow it.`
+          : `${childColumn} repeats. Rows are spread over the parents.`,
+      },
+      {
+        value: "one",
+        label: `One ${singular(parentTable)} — one ${singular(childTable)}`,
+        hint: `${childColumn} is used once per parent. Seeding is capped at the number of ${parentTable}.`,
+      },
+    ],
+  });
+  if (!kind || kind === now) return;
+  if (kind === "many" && fixed) {
+    toast(`${childTable}.${childColumn} is unique in the database — that is what makes it one-to-one`, "bad");
+    return;
+  }
+
+  cp.unique = kind === "one";
+  cp.confidence = "manual";
+  cp.why = kind === "one"
+    ? `one-to-one — each ${singular(parentTable)} is used once`
+    : `foreign key to ${parentTable}.${parentColumn}`;
+  await pushPlan();
+  renderDiagram();
+  toast(`${parentTable} → ${childTable} is now ` +
+    (kind === "one" ? "one-to-one" : "one-to-many"), "good");
+
+  // The mapping now says one-to-one; the database still allows two. Offering
+  // the index is the same offer made when a relationship is first drawn, and
+  // it goes through the SQL dialog like everything else.
+  if (kind === "one" && !fixed) await offerUniqueIndex(childTable, childColumn);
+}
+
+async function offerUniqueIndex(table, column) {
+  const t = app.schema.tables.find((x) => x.name === table);
+  const rows = (t && t.existing_rows) || 0;
+  const ok = await ask({
+    title: "Have the database enforce it?",
+    body: `A unique index on ${table}.${column} makes one-to-one a rule rather than a habit.` +
+      (rows > 0
+        ? ` ${table} already has ${fmt(rows)} rows, and the index will fail if any two of them share a ${column}.`
+        : ""),
+    okLabel: "Add index",
+  });
+  if (!ok) return;
+
+  app.pending.push({ kind: "add_unique", table, column });
+  renderDiagram();
+  reviewSchema();
+}
+
 function edgeMenu(key) {
   const [child, parent] = key.split("→");
   const childTable = child.slice(0, child.lastIndexOf("."));
   const parentTable = parent.slice(0, parent.lastIndexOf("."));
   const items = [
+    { label: "Change what this relationship is…", run: () => changeCardinality(key) },
     { label: app.flow === key ? "Stop following" : "Follow this relationship",
       run: () => followEdge(key) },
   ];
@@ -3012,6 +3491,7 @@ function draftCard(d) {
     d.table = to;
     app.layout[to] = app.layout[from] || draftSpot();
     delete app.layout[from];
+    if (app.pinned[from]) { app.pinned[to] = true; delete app.pinned[from]; }
     saveLayout();
     renderDiagram();
   });
@@ -3040,6 +3520,7 @@ function draftCard(d) {
   remove.addEventListener("click", () => {
     app.drafts.splice(app.drafts.indexOf(d), 1);
     delete app.layout[d.table];
+    delete app.pinned[d.table];
     saveLayout();
     renderDiagram();
   });

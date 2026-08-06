@@ -69,6 +69,7 @@ CREATE TABLE orders (
 // MySQL spells the same schema a third way: no boolean, no timestamptz, and a
 // key that fills itself is AUTO_INCREMENT rather than a serial type.
 const mysqlSchema = `
+DROP TABLE IF EXISTS invoices;
 DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS users;
 CREATE TABLE users (
@@ -161,12 +162,58 @@ func openMySQL(t *testing.T, dsn string) target {
 	if err := raw.Ping(); err != nil {
 		t.Skipf("mysql is not reachable: %v", err)
 	}
+	// The database named by SEEDORA_TEST_MYSQL is one the tests may destroy, and
+	// emptying it first is what makes the suite immune to whatever a previous
+	// run — or a previous experiment — left in it. A leftover child table makes
+	// every DROP TABLE below fail on a foreign key.
+	if err := dropAllMySQL(raw); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := raw.Exec(mysqlSchema); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { raw.Close() })
 
 	return connect(t, "mysql", dsn, raw)
+}
+
+// dropAllMySQL empties the test database. Foreign key checks are off for the
+// duration because the drop order of a schema nobody wrote down is not worth
+// computing.
+func dropAllMySQL(raw *sql.DB) error {
+	rows, err := raw.Query(`
+SELECT TABLE_NAME FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return err
+		}
+		names = append(names, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		return nil
+	}
+
+	if _, err := raw.Exec("SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		return err
+	}
+	defer raw.Exec("SET FOREIGN_KEY_CHECKS = 1")
+	for _, n := range names {
+		if _, err := raw.Exec("DROP TABLE IF EXISTS `" + n + "`"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func connect(t *testing.T, name, dsn string, raw *sql.DB) target {

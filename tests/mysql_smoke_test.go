@@ -5,7 +5,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/bakhod1r/seedora/internal/db"
 	"github.com/bakhod1r/seedora/internal/ddl"
 	"github.com/bakhod1r/seedora/internal/plan"
 	"github.com/bakhod1r/seedora/internal/seed"
@@ -17,17 +16,23 @@ func TestMySQLSmoke(t *testing.T) {
 		t.Skip("no mysql")
 	}
 	ctx := context.Background()
-	d, err := db.Open(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close(ctx)
+
+	// The schema this test builds on is created here rather than assumed: a
+	// test that depends on another test having run is a test that passes on a
+	// laptop and fails in CI.
+	d := openMySQL(t, dsn).driver
 	t.Log("engine", d.Name(), "dialect", d.Dialect())
 
-	if tx, err := d.Begin(ctx); err == nil {
-		_ = tx.Exec(ctx, "DROP TABLE IF EXISTS `invoices`")
-		_ = tx.Commit(ctx)
+	dropInvoices := func() {
+		if tx, err := d.Begin(context.WithoutCancel(ctx)); err == nil {
+			_ = tx.Exec(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS `invoices`")
+			_ = tx.Commit(context.WithoutCancel(ctx))
+		}
 	}
+	dropInvoices()
+	// And again afterwards: a child table left behind makes every other test's
+	// DROP TABLE users fail, whatever order they run in.
+	t.Cleanup(dropInvoices)
 	s, err := d.Introspect(ctx)
 	if err != nil {
 		t.Fatal(err)

@@ -1886,11 +1886,68 @@ dialog {
   border-radius: var(--radius-sm);
 }
 
+/* The cardinality marker is also the control that changes it, so it has to
+   take a pointer — the rest of the edge layer does not. */
+.edge-mark {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.edge-mark:hover {
+  stroke-width: 2.5;
+  filter: brightness(1.35);
+}
+
 /* A column dragged onto another table's column draws a relationship rather
    than reordering, so the drop target is outlined whole instead of edged. */
 .col.drop-link {
   background: var(--link-soft);
   box-shadow: inset 0 0 0 1px var(--link);
+}
+
+/* A question with several answers rather than two: each choice is a row with
+   its own explanation, because the difference between one-to-many and
+   one-to-one is the explanation. */
+.ask-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+
+.ask-choice {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  text-align: left;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.ask-choice:hover,
+.ask-choice.on {
+  border-color: var(--link);
+  background: var(--link-soft);
+}
+
+.ask-choice .mark {
+  font-family: var(--font-mono);
+  color: var(--link);
+  line-height: 1.4;
+}
+
+.ask-choice .body { display: flex; flex-direction: column; gap: 2px; }
+.ask-choice .name { font-weight: 600; }
+.ask-choice .hint { color: var(--muted); font-size: 12px; }
+
+/* Dropped on the card rather than on one of its columns: the child column does
+   not exist yet, and the whole table is the target. */
+.table.drop-link {
+  box-shadow: 0 0 0 2px var(--link);
 }
 
 /* ==========================================================================

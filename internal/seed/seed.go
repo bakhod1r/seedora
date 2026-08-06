@@ -190,6 +190,18 @@ func seedTable(
 
 	var src db.Source = newProducer(rows, opts.Batch, gen.batch)
 
+	// A composite primary key made of foreign keys — a join table — constrains
+	// the combination rather than either column, which is the one thing the
+	// per-column uniqueness pass cannot repair. Its pairs are assigned from the
+	// parent pools instead of drawn.
+	comp, err := newComposite(t, tp, fks, rows, derive(baseSeed, t.Name))
+	if err != nil {
+		return 0, err
+	}
+	if comp != nil {
+		src = &compositeSource{src: src, set: comp}
+	}
+
 	// Uniqueness is enforced here rather than inside a worker: it is the one
 	// piece of per-table state that every row touches, and a lock around it on
 	// the generating side would serialise the pool it exists to parallelise.
@@ -519,6 +531,27 @@ func resize(batch []map[string]any, n int) []map[string]any {
 	}
 	return batch
 }
+
+// compositeSource assigns each row its combination of parent keys, in order.
+type compositeSource struct {
+	src db.Source
+	set *composite
+}
+
+func (c *compositeSource) Rows() iter.Seq[map[string]any] {
+	return func(yield func(map[string]any) bool) {
+		i := 0
+		for row := range c.src.Rows() {
+			c.set.assign(row, i)
+			if !yield(row) {
+				return
+			}
+			i++
+		}
+	}
+}
+
+func (c *compositeSource) Err() error { return c.src.Err() }
 
 // uniqueSource enforces uniqueness as rows pass through, in order.
 type uniqueSource struct {

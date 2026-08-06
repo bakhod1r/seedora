@@ -619,3 +619,111 @@ func TestDialectForAndTypes(t *testing.T) {
 		}
 	}
 }
+
+// A relationship drawn onto a column that already exists is a constraint and
+// nothing else: no column is added, and the statement is one ALTER.
+func TestAddForeignKeyRendersOneStatement(t *testing.T) {
+	s := &model.Schema{Tables: []*model.Table{
+		{Name: "users", PrimaryKey: []string{"id"}, Columns: []*model.Column{{Name: "id", Type: "bigint"}}},
+		{Name: "orders", Columns: []*model.Column{
+			{Name: "id", Type: "bigint"},
+			{Name: "user_id", Type: "bigint"},
+		}},
+	}}
+	change := Change{Kind: AddForeignKey, Table: "orders", Column: "user_id", References: "users.id"}
+
+	stmts, err := Plan(Postgres, s, []Change{change})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stmts) != 1 {
+		t.Fatalf("got %d statements, want 1: %v", len(stmts), stmts)
+	}
+	want := `ALTER TABLE "orders" ADD FOREIGN KEY ("user_id") REFERENCES "users" ("id")`
+	if stmts[0] != want {
+		t.Errorf("got %q, want %q", stmts[0], want)
+	}
+
+	// MySQL takes the same statement in its own quoting.
+	mysql, err := Plan(MySQL, s, []Change{change})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mysql[0]; got != "ALTER TABLE `orders` ADD FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)" {
+		t.Errorf("mysql: got %q", got)
+	}
+}
+
+// The checks that stop a statement the engine would reject after the
+// transaction has already done work.
+func TestAddForeignKeyIsValidated(t *testing.T) {
+	s := &model.Schema{Tables: []*model.Table{
+		{Name: "users", PrimaryKey: []string{"id"}, Columns: []*model.Column{
+			{Name: "id", Type: "bigint"},
+			{Name: "city", Type: "varchar"},
+		}},
+		{Name: "orders", Columns: []*model.Column{{Name: "user_id", Type: "bigint"}}},
+	}}
+
+	cases := map[string]Change{
+		"unknown table":  {Kind: AddForeignKey, Table: "nope", Column: "user_id", References: "users.id"},
+		"unknown column": {Kind: AddForeignKey, Table: "orders", Column: "nope", References: "users.id"},
+		"unknown parent": {Kind: AddForeignKey, Table: "orders", Column: "user_id", References: "nope.id"},
+		"parent not key": {Kind: AddForeignKey, Table: "orders", Column: "user_id", References: "users.city"},
+		"malformed":      {Kind: AddForeignKey, Table: "orders", Column: "user_id", References: "users"},
+	}
+	for name, c := range cases {
+		if errs := Validate(Postgres, s, []Change{c}); len(errs) == 0 {
+			t.Errorf("%s: was accepted", name)
+		}
+	}
+
+	// SQLite cannot do this at all, and says so rather than rendering SQL that
+	// fails at the server.
+	ok := Change{Kind: AddForeignKey, Table: "orders", Column: "user_id", References: "users.id"}
+	if errs := Validate(SQLite, s, []Change{ok}); len(errs) == 0 {
+		t.Error("SQLite accepted an ALTER TABLE ADD FOREIGN KEY")
+	}
+	if errs := Validate(Postgres, s, []Change{ok}); len(errs) != 0 {
+		t.Errorf("a valid change was rejected: %v", errs)
+	}
+}
+
+// Turning a one-to-many into a one-to-one is a unique index — the spelling all
+// three engines accept on a table that already exists.
+func TestAddUniqueRendersAnIndex(t *testing.T) {
+	s := &model.Schema{Tables: []*model.Table{
+		{Name: "profiles", Columns: []*model.Column{{Name: "user_id", Type: "bigint"}}},
+	}}
+	c := Change{Kind: AddUnique, Table: "profiles", Column: "user_id"}
+
+	for _, d := range []Dialect{Postgres, SQLite, MySQL} {
+		stmts, err := Plan(d, s, []Change{c})
+		if err != nil {
+			t.Fatalf("%s: %v", d, err)
+		}
+		if len(stmts) != 1 || !strings.Contains(stmts[0], "CREATE UNIQUE INDEX") {
+			t.Errorf("%s: got %v", d, stmts)
+		}
+		if !strings.Contains(stmts[0], "profiles_user_id_key") {
+			t.Errorf("%s: index is not named conventionally: %v", d, stmts)
+		}
+	}
+
+	// A column that is already unique, and a column that does not exist.
+	s.Tables[0].Columns[0].Unique = true
+	if errs := Validate(Postgres, s, []Change{c}); len(errs) == 0 {
+		t.Error("an index on an already-unique column was accepted")
+	}
+	if errs := Validate(Postgres, s, []Change{{Kind: AddUnique, Table: "profiles", Column: "nope"}}); len(errs) == 0 {
+		t.Error("an index on a missing column was accepted")
+	}
+
+	// Rows already there can break the index, and that is worth saying before
+	// it runs rather than after.
+	s.Tables[0].Columns[0].Unique = false
+	s.Tables[0].ExistingRows = 5000
+	if errs := Validate(Postgres, s, []Change{c}); len(errs) == 0 {
+		t.Error("no warning about the rows already in the table")
+	}
+}

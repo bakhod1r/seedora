@@ -27,6 +27,16 @@ const (
 	DropTable   Kind = "drop_table"
 	AddColumn   Kind = "add_column"
 	DropColumn  Kind = "drop_column"
+	// AddForeignKey constrains a column that already exists to point at
+	// another table's key. It is separate from AddColumn because the column is
+	// already there and only the constraint is new — the case where a schema
+	// grew a relationship somebody drew after the fact.
+	AddForeignKey Kind = "add_foreign_key"
+	// AddUnique constrains a column that already exists to hold no value twice.
+	// It is what turns a one-to-many into a one-to-one, and it is a unique
+	// index rather than a table constraint because that spelling is the one all
+	// three engines accept on a table that already has rows.
+	AddUnique Kind = "add_unique"
 )
 
 // Change is one edit to the schema.
@@ -37,8 +47,10 @@ type Change struct {
 	// Columns is the full column list for CreateTable, or the single column for
 	// AddColumn.
 	Columns []Column `json:"columns,omitempty"`
-	// Column names the target of DropColumn.
+	// Column names the target of DropColumn and of AddForeignKey.
 	Column string `json:"column,omitempty"`
+	// References is "table.column", the parent an AddForeignKey points at.
+	References string `json:"references,omitempty"`
 }
 
 // Column is a column as the diagram describes it. It is a smaller thing than
@@ -99,6 +111,21 @@ func Plan(d Dialect, s *model.Schema, changes []Change) ([]string, error) {
 				}
 				alters = append(alters, stmts...)
 			}
+
+		case AddUnique:
+			alters = append(alters, fmt.Sprintf(
+				"CREATE UNIQUE INDEX %s ON %s (%s)",
+				quoteAs(d, indexName(c.Table, c.Column)), quoteAs(d, c.Table), quoteAs(d, c.Column)))
+
+		case AddForeignKey:
+			t, rc, ok := splitRef(c.References)
+			if !ok {
+				return nil, fmt.Errorf("%s.%s: references must be table.column, got %q",
+					c.Table, c.Column, c.References)
+			}
+			alters = append(alters, fmt.Sprintf(
+				"ALTER TABLE %s ADD FOREIGN KEY (%s) REFERENCES %s (%s)",
+				quoteAs(d, c.Table), quoteAs(d, c.Column), quoteAs(d, t), quoteAs(d, rc)))
 
 		case DropColumn:
 			dropCols = append(dropCols,
@@ -435,6 +462,72 @@ func Validate(d Dialect, s *model.Schema, changes []Change) []error {
 				}
 			}
 
+		case AddUnique:
+			t := s.Table(c.Table)
+			if t == nil {
+				fail("table %s does not exist", c.Table)
+				continue
+			}
+			col := t.Column(c.Column)
+			switch {
+			case col == nil:
+				fail("%s has no column named %s", c.Table, c.Column)
+			case col.Unique:
+				fail("%s.%s is already unique", c.Table, c.Column)
+			case t.ExistingRows > 0:
+				// The engine will refuse it if the rows already repeat, and it
+				// will do so after the transaction has done other work. This is
+				// a warning in the same place as everything else, not a refusal
+				// the user cannot override — so it is only raised when there is
+				// something to break.
+				fail("%s already has %d rows — the index will fail if any two of them "+
+					"share a %s. Truncate first, or check the data.",
+					c.Table, t.ExistingRows, c.Column)
+			}
+
+		case AddForeignKey:
+			// SQLite has no ALTER TABLE ADD CONSTRAINT at all: a foreign key
+			// there can only be declared when the column is, and adding one
+			// afterwards means rebuilding the table and copying every row.
+			// Refusing is the honest answer; the mapping-level relationship
+			// still works and needs no DDL.
+			if d == SQLite {
+				fail("SQLite cannot add a foreign key to a column that already exists — " +
+					"the relationship still works as a mapping, or recreate the table with it")
+				continue
+			}
+			t := s.Table(c.Table)
+			if t == nil {
+				fail("table %s does not exist", c.Table)
+				continue
+			}
+			child := t.Column(c.Column)
+			if child == nil {
+				fail("%s has no column named %s", c.Table, c.Column)
+				continue
+			}
+			rt, rc, ok := splitRef(c.References)
+			if !ok {
+				fail("%s.%s: references must be table.column, got %q",
+					c.Table, c.Column, c.References)
+				continue
+			}
+			parent := s.Table(rt)
+			switch {
+			case parent == nil:
+				fail("%s.%s references unknown table %s", c.Table, c.Column, rt)
+			case parent.Column(rc) == nil:
+				fail("%s.%s references unknown column %s.%s", c.Table, c.Column, rt, rc)
+			default:
+				// The engine will refuse a constraint that existing rows break,
+				// and it will do it after the transaction has done other work.
+				// Saying it here costs one check and reports it with the rest.
+				p := parent.Column(rc)
+				if !p.Unique && !isPrimaryKey(parent, rc) {
+					fail("%s.%s is neither a primary key nor unique, so it cannot be referenced", rt, rc)
+				}
+			}
+
 		case DropColumn:
 			t := s.Table(c.Table)
 			if t == nil {
@@ -497,6 +590,21 @@ func Validate(d Dialect, s *model.Schema, changes []Change) []error {
 			"make one of the keys nullable and add it afterwards", cyc)
 	}
 	return errs
+}
+
+// indexName is the conventional name for a unique index on one column, the
+// same one Postgres generates for a UNIQUE constraint.
+func indexName(table, column string) string {
+	return table + "_" + column + "_key"
+}
+
+func isPrimaryKey(t *model.Table, col string) bool {
+	for _, k := range t.PrimaryKey {
+		if k == col {
+			return true
+		}
+	}
+	return false
 }
 
 // cycle reports a reference cycle among newly created tables, which cannot be

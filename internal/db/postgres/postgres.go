@@ -137,6 +137,9 @@ func (d *Driver) Introspect(ctx context.Context) (*model.Schema, error) {
 	if err := d.loadConstraints(ctx, byName); err != nil {
 		return nil, err
 	}
+	if err := d.loadUniqueIndexes(ctx, byName); err != nil {
+		return nil, err
+	}
 	if err := d.loadCounts(ctx, s); err != nil {
 		return nil, err
 	}
@@ -297,6 +300,49 @@ ORDER BY c.relname, con.conname, k.ord`
 			// unmarked and the user maps them explicitly.
 			if width == 1 && refTable != "" {
 				c.FK = &model.Ref{Table: refTable, Column: refCol}
+			}
+		}
+	}
+	return rows.Err()
+}
+
+// loadUniqueIndexes marks columns held unique by an index rather than by a
+// constraint.
+//
+// Postgres has two ways to say the same thing. `UNIQUE` on a column is a
+// constraint with an index behind it; `CREATE UNIQUE INDEX` is the index alone,
+// and pg_constraint knows nothing about it. Both enforce uniqueness identically,
+// and a seeder that only reads the first will happily generate duplicates and
+// then fail at the insert. `ALTER TABLE ADD CONSTRAINT` is not usable on a
+// table with rows in every case, so the index is the spelling Seedora itself
+// writes — which makes reading it back the other half of that decision.
+func (d *Driver) loadUniqueIndexes(ctx context.Context, byName map[string]*model.Table) error {
+	const q = `
+SELECT c.relname AS table_name, a.attname AS column_name
+FROM pg_index i
+JOIN pg_class c     ON c.oid = i.indrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+WHERE i.indisunique
+  AND i.indnkeyatts = 1
+  AND NOT i.indisprimary
+  AND i.indpred IS NULL
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')`
+
+	rows, err := d.conn.Query(ctx, q)
+	if err != nil {
+		return fmt.Errorf("read unique indexes: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var table, column string
+		if err := rows.Scan(&table, &column); err != nil {
+			return err
+		}
+		if t, ok := byName[table]; ok {
+			if c := t.Column(column); c != nil {
+				c.Unique = true
 			}
 		}
 	}

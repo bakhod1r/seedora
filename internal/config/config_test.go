@@ -73,13 +73,19 @@ func TestDSNCannotLeakThroughLoggingOrJSON(t *testing.T) {
 		t.Fatal("DSN did not load")
 	}
 
-	for _, rendered := range []string{
-		fmt.Sprint(cfg.DSN),
-		fmt.Sprintf("%v", cfg.DSN),
-		fmt.Sprintf("%s", cfg.DSN),
-		fmt.Sprintf("%+v", cfg),
-		fmt.Sprintf("%#v", cfg),
-	} {
+	// The verbs are a slice rather than five literal calls: every one of them
+	// has to mask, and writing %s as a literal is the one thing a linter
+	// rewrites into String(), which would stop testing what this tests.
+	var rendered []string
+	rendered = append(rendered, fmt.Sprint(cfg.DSN))
+	for _, verb := range []string{"%v", "%s"} {
+		rendered = append(rendered, fmt.Sprintf(verb, cfg.DSN))
+	}
+	for _, verb := range []string{"%+v", "%#v"} {
+		rendered = append(rendered, fmt.Sprintf(verb, cfg))
+	}
+
+	for _, rendered := range rendered {
 		if strings.Contains(rendered, "hunter2") {
 			t.Errorf("password reached a formatted string: %s", rendered)
 		}
