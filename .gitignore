@@ -1,0 +1,22 @@
+# The built binaries, anchored to the repository root. Without the leading slash
+# these patterns also match the cmd/seedora/ and tools/pages/ directories, which
+# would keep the source out of the repository.
+/seedora
+/pages
+
+# Scratch database and config produced by `make demo` and `make dev`.
+/tmp/
+
+/coverage.out
+
+# A developer's own database and mapping. seedora.yaml is meant to be committed
+# by the projects that use Seedora, but not by Seedora itself.
+/seedora.yaml
+*.db
+*.sqlite
+*.sqlite3
+
+# oneenv reads these, and they are where a DSN with a password lives.
+.env
+.env.*
+!.env.example

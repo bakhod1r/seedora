@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/bakhod1r/seedora/security/advisories/new
+    about: Report privately. Do not open a public issue for this.
+  - name: Question or idea
+    url: https://github.com/bakhod1r/seedora/discussions
+    about: For anything that is not yet a bug or a request.

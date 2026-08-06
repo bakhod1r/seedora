@@ -1,0 +1,70 @@
+name: Bug report
+description: Something behaves differently from what it says it does.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A schema we can paste into a file is worth more than a description of
+        one. If you can reduce it to two tables, please do — most bugs here are
+        about a specific column shape.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: schema
+    attributes:
+      label: The schema
+      description: The smallest `CREATE TABLE` that reproduces it.
+      render: sql
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: The commands you ran, or what you clicked.
+      placeholder: |
+        1. seedora --dsn ./dev.db
+        2. Pressed Preview on `orders`
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: engine
+    attributes:
+      label: Engine and version
+      placeholder: PostgreSQL 16.2 / SQLite 3.45
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Seedora version
+      description: From `seedora version`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The error, or the rows that were wrong.
+      render: text
+
+  - type: checkboxes
+    id: credentials
+    attributes:
+      label: Before you post
+      options:
+        - label: I have removed the password from any connection string above.
+          required: true

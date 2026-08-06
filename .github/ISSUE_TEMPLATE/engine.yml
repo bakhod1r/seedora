@@ -1,0 +1,40 @@
+name: Database engine
+description: Support for an engine Seedora does not have.
+labels: [enhancement, engine]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `db.Driver` and `db.Tx` are the whole contract — introspect, begin, bulk
+        insert, truncate, read keys, exec, history. Two engines have been
+        implemented against it, so a third is the test of whether the interface
+        is drawn right. `CONTRIBUTING.md` has the details if you want to write
+        it yourself.
+
+  - type: input
+    id: engine
+    attributes:
+      label: Engine
+      placeholder: MySQL 8, ClickHouse, DuckDB…
+    validations:
+      required: true
+
+  - type: input
+    id: driver
+    attributes:
+      label: Go driver you would use
+      placeholder: github.com/go-sql-driver/mysql
+  - type: textarea
+    id: bulk
+    attributes:
+      label: Its bulk load path
+      description: >
+        The equivalent of Postgres `COPY`, if it has one. This is the part that
+        decides whether the engine is fast or merely supported.
+
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Would you write it?
+      options:
+        - label: I would be willing to open the pull request.

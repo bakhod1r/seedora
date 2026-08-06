@@ -1,0 +1,1979 @@
+/* Seedora — mapping editor.
+
+   The page is a schema diagram. One card per table, one row per column, and the
+   generator that will fill it shown inline. Everything else is chrome and gets
+   out of the way.
+
+   Three rules hold the design together:
+
+   1. Identifiers are monospace, prose is not. A column name is a thing you type
+      into code; it should look like it.
+   2. Colour carries one meaning each. Amber means "a guess, check me". Blue
+      means structure the database imposed. Green means the thing that writes.
+      Nothing is coloured for decoration.
+   3. Density over comfort. This is a tool kept open beside an editor, not a
+      landing page. Rows are tight, but never tighter than the hit target they
+      need. */
+
+/* ==========================================================================
+   Tokens
+   ========================================================================== */
+
+:root {
+  /* Spacing — a 4px scale. Every gap, pad, and margin comes from here, which is
+     what makes unrelated parts of the page feel like one thing. */
+  --s1: 0.25rem;
+  --s2: 0.5rem;
+  --s3: 0.75rem;
+  --s4: 1rem;
+  --s5: 1.5rem;
+  --s6: 2rem;
+
+  /* Type — 13px base. A developer tool is scanned for names at a glance, so
+     density earns more than comfort does. */
+  --text-xs: 0.6875rem;
+  --text-sm: 0.75rem;
+  --text-base: 0.8125rem;
+  --text-md: 0.875rem;
+  --text-lg: 1.0625rem;
+  --text-xl: 1.375rem;
+
+  --font-ui: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --radius-sm: 5px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-full: 999px;
+
+  /* Motion — fast enough to read as a response, not an animation. Past about
+     200ms on a tool it reads as lag. */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  /* Two more curves for the motion that carries weight. --ease-out settles
+     rather than stopping, which is what makes a panel feel attached to
+     something; --ease-spring overshoots by a hair, which is what makes a
+     control feel pressed rather than repainted. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  /* Motion is timed the way things move: short for a state change nobody is
+     watching, long enough to be followed for anything that travels across the
+     screen. The old values were correct and lifeless — 90ms reads as a repaint,
+     not as a movement. */
+  --fast: 140ms;
+  --normal: 240ms;
+  --slow: 480ms;
+  --travel: 620ms;
+}
+
+/* Dark is the default: this sits next to an editor, and most of those are dark.
+   Light is fully supported, not an afterthought. */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0d0f12;
+  --bg-sunken: #090a0c;
+  --surface: #15181d;
+  --surface-2: #1c2027;
+  --surface-3: #242931;
+
+  --border: #262b33;
+  --border-strong: #333a45;
+
+  --fg: #e8eaee;
+  --fg-muted: #9aa3b0;
+  --fg-subtle: #6b7480;
+
+  --accent: #3fa06a;
+  --accent-hover: #4bb87a;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(63, 160, 106, 0.14);
+  --accent-line: rgba(63, 160, 106, 0.4);
+
+  --warn: #d1a038;
+  --warn-soft: rgba(209, 160, 56, 0.13);
+  --warn-line: rgba(209, 160, 56, 0.42);
+
+  --danger: #d2564c;
+  --danger-soft: rgba(210, 86, 76, 0.13);
+  --danger-line: rgba(210, 86, 76, 0.42);
+
+  --key: #d3a34a;
+  --link: #5b9bd8;
+  --link-soft: rgba(91, 155, 216, 0.13);
+  --link-line: rgba(91, 155, 216, 0.42);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 16px 48px rgba(0, 0, 0, 0.6);
+
+  --scrim: rgba(6, 8, 10, 0.72);
+
+  /* Table hues. Eight, because past that they stop being tellable apart at the
+     size a card header is drawn. Each is a line colour and a wash; the wash is
+     what tints the header without swallowing the text. */
+  --h0: #5b9bd8; --h0-soft: rgba(91, 155, 216, 0.16);
+  --h1: #3fa06a; --h1-soft: rgba(63, 160, 106, 0.16);
+  --h2: #c8863c; --h2-soft: rgba(200, 134, 60, 0.16);
+  --h3: #b96ab0; --h3-soft: rgba(185, 106, 176, 0.16);
+  --h4: #4fa8a0; --h4-soft: rgba(79, 168, 160, 0.16);
+  --h5: #cf6a5e; --h5-soft: rgba(207, 106, 94, 0.16);
+  --h6: #8b8fd6; --h6-soft: rgba(139, 143, 214, 0.16);
+  --h7: #9aa62f; --h7-soft: rgba(154, 166, 47, 0.16);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f6f7f9;
+  --bg-sunken: #eceef2;
+  --surface: #ffffff;
+  --surface-2: #f2f4f7;
+  --surface-3: #e7eaef;
+
+  --border: #dfe3e9;
+  --border-strong: #c3cad4;
+
+  --fg: #16191e;
+  --fg-muted: #5b6472;
+  --fg-subtle: #838d9b;
+
+  --accent: #217a4b;
+  --accent-hover: #1b6740;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(33, 122, 75, 0.1);
+  --accent-line: rgba(33, 122, 75, 0.32);
+
+  --warn: #8a6316;
+  --warn-soft: rgba(138, 99, 22, 0.1);
+  --warn-line: rgba(138, 99, 22, 0.32);
+
+  --danger: #b23a30;
+  --danger-soft: rgba(178, 58, 48, 0.09);
+  --danger-line: rgba(178, 58, 48, 0.32);
+
+  --key: #96701d;
+  --link: #2b6cb0;
+  --link-soft: rgba(43, 108, 176, 0.09);
+  --link-line: rgba(43, 108, 176, 0.32);
+
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-2: 0 4px 12px rgba(16, 24, 40, 0.09);
+  --shadow-3: 0 16px 48px rgba(16, 24, 40, 0.16);
+
+  --scrim: rgba(30, 36, 44, 0.4);
+
+  --h0: #2b6cb0; --h0-soft: rgba(43, 108, 176, 0.11);
+  --h1: #217a4b; --h1-soft: rgba(33, 122, 75, 0.11);
+  --h2: #96701d; --h2-soft: rgba(150, 112, 29, 0.12);
+  --h3: #8c3f85; --h3-soft: rgba(140, 63, 133, 0.11);
+  --h4: #21776f; --h4-soft: rgba(33, 119, 111, 0.11);
+  --h5: #a8443a; --h5-soft: rgba(168, 68, 58, 0.1);
+  --h6: #5a5fae; --h6-soft: rgba(90, 95, 174, 0.11);
+  --h7: #6b7413; --h7-soft: rgba(107, 116, 19, 0.12);
+}
+
+/* The system preference, for anyone who has not used the toggle. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --bg: #f6f7f9;
+    --bg-sunken: #eceef2;
+    --surface: #ffffff;
+    --surface-2: #f2f4f7;
+    --surface-3: #e7eaef;
+    --border: #dfe3e9;
+    --border-strong: #c3cad4;
+    --fg: #16191e;
+    --fg-muted: #5b6472;
+    --fg-subtle: #838d9b;
+    --accent: #217a4b;
+    --accent-hover: #1b6740;
+    --accent-soft: rgba(33, 122, 75, 0.1);
+    --accent-line: rgba(33, 122, 75, 0.32);
+    --warn: #8a6316;
+    --warn-soft: rgba(138, 99, 22, 0.1);
+    --warn-line: rgba(138, 99, 22, 0.32);
+    --danger: #b23a30;
+    --danger-soft: rgba(178, 58, 48, 0.09);
+    --danger-line: rgba(178, 58, 48, 0.32);
+    --key: #96701d;
+    --link: #2b6cb0;
+    --link-soft: rgba(43, 108, 176, 0.09);
+    --link-line: rgba(43, 108, 176, 0.32);
+    --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+    --shadow-2: 0 4px 12px rgba(16, 24, 40, 0.09);
+    --shadow-3: 0 16px 48px rgba(16, 24, 40, 0.16);
+    --scrim: rgba(30, 36, 44, 0.4);
+    --h0: #2b6cb0; --h0-soft: rgba(43, 108, 176, 0.11);
+    --h1: #217a4b; --h1-soft: rgba(33, 122, 75, 0.11);
+    --h2: #96701d; --h2-soft: rgba(150, 112, 29, 0.12);
+    --h3: #8c3f85; --h3-soft: rgba(140, 63, 133, 0.11);
+    --h4: #21776f; --h4-soft: rgba(33, 119, 111, 0.11);
+    --h5: #a8443a; --h5-soft: rgba(168, 68, 58, 0.1);
+    --h6: #5a5fae; --h6-soft: rgba(90, 95, 174, 0.11);
+    --h7: #6b7413; --h7-soft: rgba(107, 116, 19, 0.12);
+  }
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+/* `hidden` works by setting `display: none` in the user-agent stylesheet, which
+   any class selector setting `display` overrides — and most panels here set one.
+   Without this the connect screen, inspector, and overlays stack on top of each
+   other whatever the JavaScript says. */
+[hidden] { display: none !important; }
+
+html { height: 100%; -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, select, textarea { font: inherit; color: inherit; }
+
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.011em; }
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 0.1em 0.35em;
+  border-radius: var(--radius-sm);
+}
+
+.spacer { flex: 1; }
+.mono { font-family: var(--font-mono); }
+.muted { color: var(--fg-muted); }
+
+/* One focus treatment everywhere. Keyboard users get a ring, pointer users do
+   not — which is exactly what :focus-visible is for. */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-full);
+}
+
+/* Someone who has asked the system for less motion gets none of ours. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ==========================================================================
+   Buttons
+   ========================================================================== */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  height: 30px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--fast) var(--ease),
+    border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.btn:hover { background: var(--surface-3); border-color: var(--border-strong); }
+.btn:active { transform: translateY(0.5px); }
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn-primary:disabled { background: var(--accent); border-color: var(--accent); }
+
+.btn-quiet { background: transparent; border-color: transparent; color: var(--fg-muted); }
+.btn-quiet:hover { background: var(--surface-2); border-color: var(--border); color: var(--fg); }
+
+.btn-icon {
+  width: 30px;
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+  color: var(--fg-muted);
+}
+.btn-icon:hover { background: var(--surface-2); border-color: var(--border); color: var(--fg); }
+
+.btn-wide { width: 100%; height: 34px; }
+
+kbd {
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  line-height: 1;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Form controls
+   ========================================================================== */
+
+input[type="text"],
+input[type="number"],
+input[type="search"],
+input[type="password"],
+textarea {
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  color: var(--fg);
+  font-size: var(--text-base);
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+textarea {
+  height: auto;
+  padding: var(--s3);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  resize: vertical;
+}
+input:hover:not(:disabled), textarea:hover { border-color: var(--border-strong); }
+input:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+input::placeholder, textarea::placeholder { color: var(--fg-subtle); }
+input[type="number"] { font-family: var(--font-mono); text-align: right; }
+
+/* The native checkbox, tinted. Rebuilding it would cost keyboard behaviour and
+   gain nothing but a shape. */
+input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex: none;
+}
+input[type="range"] {
+  accent-color: var(--accent);
+  height: auto;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+
+.field { display: grid; gap: var(--s2); }
+.field-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+.field-hint { font-size: var(--text-sm); color: var(--fg-muted); }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--text-base);
+  cursor: pointer;
+}
+.check input:disabled { cursor: not-allowed; }
+.check input:disabled + span { opacity: 0.45; }
+
+/* ==========================================================================
+   App shell
+   ========================================================================== */
+
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  height: 48px;
+  padding: 0 var(--s4);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: saturate(1.6) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--text-md);
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  flex: none;
+}
+.brand svg { display: block; color: var(--accent); }
+
+.target {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s1) var(--s3) var(--s1) var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+.target .engine {
+  flex: none;
+  padding: 1px var(--s2);
+  border-radius: var(--radius-full);
+  background: var(--surface-3);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--fg);
+}
+.target .dsn {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions { display: flex; align-items: center; gap: var(--s2); }
+
+.problems {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s3) var(--s4);
+  background: var(--danger-soft);
+  border-bottom: 1px solid var(--danger-line);
+  color: var(--danger);
+  font-size: var(--text-sm);
+  max-height: 24vh;
+  overflow: auto;
+}
+.problems div { font-family: var(--font-mono); font-size: var(--text-xs); }
+
+/* ==========================================================================
+   Connect screen
+   ========================================================================== */
+
+.connect {
+  display: grid;
+  place-items: center;
+  min-height: calc(100vh - 48px);
+  padding: var(--s6) var(--s4);
+}
+
+.panel {
+  width: min(520px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  padding: var(--s6);
+}
+.panel > h1 { font-size: var(--text-xl); margin-bottom: var(--s2); }
+.panel > .lede { color: var(--fg-muted); margin: 0 0 var(--s5); }
+
+.stack { display: grid; gap: var(--s3); }
+
+.recent { display: grid; gap: var(--s2); margin-bottom: var(--s5); }
+.recent-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s1); }
+.recent-list li { display: flex; align-items: center; gap: var(--s1); }
+
+.recent-item {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+  text-align: left;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease);
+}
+.recent-item:hover { background: var(--surface-3); border-color: var(--border-strong); }
+.recent-item strong { font-size: var(--text-base); font-weight: 600; }
+.recent-item span {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Diagram
+   ========================================================================== */
+
+.board {
+  position: relative;
+  height: calc(100vh - 48px);
+  overflow: auto;
+  background-color: var(--bg);
+  /* A dot grid. It reads as a canvas rather than a document, which is the cue
+     that the cards can be moved. */
+  background-image: radial-gradient(circle, var(--border) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* The scale is applied here, on the wrapper that holds both the cards and the
+   edges, so the two never drift apart. The origin is the top-left corner
+   because the layout is measured from there. */
+.diagram {
+  position: relative;
+  padding: var(--s5);
+  transform-origin: 0 0;
+}
+
+/* A rail down the left edge of the canvas. Vertical because the controls are
+   one axis of one setting, and docked because a floating widget over a canvas
+   that scrolls in both directions is always over something. */
+.zoom-rail {
+  position: fixed;
+  left: var(--s4);
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow-2);
+}
+
+.zoom-rule {
+  width: 60%;
+  height: 1px;
+  margin: var(--s1) 0;
+  background: var(--border);
+}
+
+/* The readout is also the reset button, so it is styled as text rather than as
+   a third control competing with the two beside it. */
+.zoom-level {
+  width: 100%;
+  padding: var(--s1) 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.zoom-level:hover { background: var(--surface-2); color: var(--fg); }
+
+/* On a narrow window the rail would sit on top of the leftmost card, so it
+   moves to the bottom corner where the canvas has margin to spare. */
+@media (max-width: 860px) {
+  .zoom-rail {
+    left: auto;
+    top: auto;
+    right: var(--s4);
+    bottom: var(--s4);
+    transform: none;
+    flex-direction: row;
+  }
+  .zoom-rule { width: 1px; height: 18px; margin: 0 var(--s1); }
+  .zoom-level { width: auto; padding: 0 var(--s2); }
+}
+
+/* The layer ignores the pointer; the lines themselves do not, so an edge can
+   be clicked to follow it. */
+.edges { position: absolute; inset: 0; pointer-events: none; overflow: visible; z-index: 0; }
+.edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.edge { fill: none; stroke: var(--link); stroke-width: 1.5; opacity: 0.45; }
+.edge.lit { opacity: 1; stroke-width: 2; }
+.edge-dot { fill: var(--link); opacity: 0.8; }
+
+/* A self join is dashed. Two edges of the same colour touching the same card
+   otherwise look like one line that was drawn wrong. */
+.edge.self { stroke-dasharray: 4 3; opacity: 0.6; }
+.edge.self.lit { opacity: 1; }
+
+/* A followed edge runs its dashes from child to parent, which is the direction
+   a row is written in: the child's key is chosen from what the parent holds. */
+.edge.flow {
+  opacity: 1;
+  stroke-width: 2.5;
+  stroke-dasharray: 7 6;
+  filter: drop-shadow(0 0 6px currentColor);
+  animation: edge-flow 0.9s linear infinite;
+}
+@keyframes edge-flow { to { stroke-dashoffset: -13; } }
+
+.edge-comet { filter: drop-shadow(0 0 5px currentColor); }
+
+/* The cardinality of the relationship, written on the line. Small, and dimmed
+   until the edge matters, so twenty of them do not read as noise. */
+.edge-label {
+  fill: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3;
+  stroke-linejoin: round;
+  opacity: 0.55;
+  pointer-events: none;
+  user-select: none;
+}
+.edge-label.lit { fill: var(--fg); opacity: 1; }
+
+.edges.focusing .edge-label:not(.lit) { opacity: 0.15; }
+
+@media (prefers-reduced-motion: reduce) {
+  .edge.flow { animation: none; }
+}
+
+/* The container spans the whole canvas, so left hit-testable it would swallow
+   every click meant for an edge underneath it. The cards take the pointer back;
+   the empty space between them belongs to the edges and to the canvas. */
+.tables { position: relative; z-index: 1; pointer-events: none; }
+.table { pointer-events: auto; }
+
+/* Every card carries a hue. It is not decoration: the same colour marks the
+   card, its accent rail, and every foreign key that points at it, so a
+   relationship can be traced across the canvas without reading a single label.
+   The default comes from the table's name, so it is stable between sessions and
+   between machines; picking one overrides it. */
+.table {
+  --hue: var(--h0);
+  --hue-soft: var(--h0-soft);
+
+  position: absolute;
+  width: 300px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--hue);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  transition: box-shadow var(--normal) var(--ease), border-color var(--normal) var(--ease);
+}
+.table[data-hue="0"] { --hue: var(--h0); --hue-soft: var(--h0-soft); }
+.table[data-hue="1"] { --hue: var(--h1); --hue-soft: var(--h1-soft); }
+.table[data-hue="2"] { --hue: var(--h2); --hue-soft: var(--h2-soft); }
+.table[data-hue="3"] { --hue: var(--h3); --hue-soft: var(--h3-soft); }
+.table[data-hue="4"] { --hue: var(--h4); --hue-soft: var(--h4-soft); }
+.table[data-hue="5"] { --hue: var(--h5); --hue-soft: var(--h5-soft); }
+.table[data-hue="6"] { --hue: var(--h6); --hue-soft: var(--h6-soft); }
+.table[data-hue="7"] { --hue: var(--h7); --hue-soft: var(--h7-soft); }
+.table:hover { box-shadow: var(--shadow-2); }
+.table:hover .swatch { opacity: 1; }
+.table.dragging {
+  z-index: 20;
+  box-shadow: var(--shadow-3);
+  border-color: var(--accent);
+  /* Nothing animates under the pointer: the card must sit exactly where the
+     cursor is, or dragging feels like it is fighting back. */
+  transition: none;
+}
+.table.excluded { opacity: 0.5; }
+
+/* The header is the drag handle. `touch-action: none` stops the browser from
+   claiming the gesture as a scroll before the pointer handlers see it, which is
+   what makes dragging work on a trackpad as well as a mouse. */
+.table-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--hue-soft);
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.table.dragging .table-head { cursor: grabbing; }
+.table-head input { cursor: auto; }
+
+/* The name takes the slack and truncates; everything else is fixed width. The
+   `min-width: 0` matters — without it a flex item refuses to shrink below its
+   content, and a long table name pushes the row count off the card. */
+.table-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.table-count { flex: none; font-size: var(--text-xs); font-family: var(--font-mono); color: var(--fg-subtle); }
+
+/* Scoped past the base `input[type="number"]` rule on purpose. An attribute
+   selector scores (0,1,1) and a bare class only (0,1,0), so `.rows-input` alone
+   loses to it — the input takes `width: 100%` and squeezes the table name out of
+   the header entirely. */
+.table-head .rows-input,
+.seed-table .rows-input {
+  flex: none;
+  width: 76px;
+  height: 24px;
+  padding: 0 var(--s2);
+  font-size: var(--text-xs);
+}
+.seed-table .rows-input { width: 92px; height: 26px; }
+
+.col {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  gap: var(--s2);
+  align-items: center;
+  min-height: 28px;
+  padding: var(--s1) var(--s3);
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  cursor: pointer;
+  transition: background var(--fast) var(--ease);
+}
+.col:hover { background: var(--surface-2); }
+.col.selected { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.col.skipped .col-name { opacity: 0.5; text-decoration: line-through; text-decoration-thickness: 1px; }
+
+.col-key { font-size: 10px; line-height: 1; text-align: center; color: var(--fg-subtle); }
+.col-key.pk { color: var(--key); }
+.col-key.fk { color: var(--link); }
+
+.col-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.col-name .nn {
+  margin-left: var(--s1);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--fg-subtle);
+  vertical-align: 1px;
+}
+
+/* The generator badge. Its colour is the point of the row: amber means Seedora
+   guessed and wants confirming, blue means the database decided, plain means a
+   settled choice. */
+.gen {
+  flex: none;
+  max-width: 128px;
+  padding: 1px var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gen.guess { background: var(--warn-soft); border-color: var(--warn-line); color: var(--warn); }
+.gen.structure { background: var(--link-soft); border-color: var(--link-line); color: var(--link); }
+
+.table-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.table-foot .btn { height: 24px; font-size: var(--text-xs); }
+
+/* ==========================================================================
+   Inspector
+   ========================================================================== */
+
+.inspector {
+  position: fixed;
+  top: 48px;
+  right: 0;
+  bottom: 0;
+  z-index: 25;
+  width: min(384px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-3);
+  animation: slide-in var(--normal) var(--ease);
+}
+@keyframes slide-in {
+  from { transform: translateX(12px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+.inspector-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  padding: var(--s4);
+  border-bottom: 1px solid var(--border);
+}
+.eyebrow {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+.inspector-head h2 {
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  margin: 2px 0 var(--s2);
+  word-break: break-all;
+}
+.inspector-type { display: flex; flex-wrap: wrap; gap: var(--s1); }
+
+.tag {
+  padding: 1px var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+.tag.key { color: var(--key); border-color: color-mix(in srgb, var(--key) 40%, transparent); }
+.tag.fk { color: var(--link); border-color: var(--link-line); }
+
+.inspector-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  padding: var(--s4);
+  overflow: auto;
+}
+
+.note {
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border-left: 2px solid var(--border-strong);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+.note.guess { background: var(--warn-soft); border-left-color: var(--warn); color: var(--warn); }
+
+/* Generator picker.
+
+   A real listbox rather than a native <select>. Native gives no way to group,
+   badge, or explain an option, and this list is the one decision the whole page
+   exists to support — it has to be searchable and arrow-key navigable. */
+
+.picker { display: grid; gap: var(--s2); min-height: 0; }
+
+.picker-search { position: relative; }
+.picker-search input { padding-left: 30px; }
+.picker-search svg {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--fg-subtle);
+  pointer-events: none;
+}
+
+.picker-list {
+  max-height: 288px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  padding: var(--s1);
+}
+
+.picker-group {
+  position: sticky;
+  top: 0;
+  padding: var(--s2) var(--s2) var(--s1);
+  background: var(--bg-sunken);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+
+.picker-option {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.picker-option:hover { background: var(--surface-2); }
+.picker-option.active { background: var(--surface-3); }
+.picker-option[aria-selected="true"] {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+  font-weight: 550;
+}
+.picker-option .id {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-subtle);
+}
+.picker-empty { padding: var(--s4); text-align: center; color: var(--fg-subtle); font-size: var(--text-sm); }
+
+.opts { display: grid; gap: var(--s3); }
+.switches { display: grid; gap: var(--s3); padding-top: var(--s3); border-top: 1px solid var(--border); }
+
+.slider-row { display: flex; align-items: center; gap: var(--s3); }
+.slider-row input[type="range"] { flex: 1; }
+.slider-value {
+  flex: none;
+  width: 38px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+/* ==========================================================================
+   Preview
+   ========================================================================== */
+
+.preview {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 24;
+  height: 40vh;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  box-shadow: var(--shadow-3);
+  animation: slide-up var(--normal) var(--ease);
+}
+.preview.with-inspector { right: min(384px, 100vw); }
+@keyframes slide-up {
+  from { transform: translateY(12px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+.preview-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3) var(--s2) var(--s4);
+  border-bottom: 1px solid var(--border);
+}
+.preview-head h2 { font-size: var(--text-md); }
+.preview-scroll { flex: 1; overflow: auto; }
+
+.data-table { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; }
+.data-table th,
+.data-table td {
+  padding: var(--s2) var(--s3);
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--border);
+}
+.data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+.data-table tbody tr:hover td { background: var(--surface-2); }
+.data-table td.null { color: var(--fg-subtle); font-style: italic; }
+
+/* ==========================================================================
+   Dialogs
+   ========================================================================== */
+
+dialog {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: var(--shadow-3);
+  max-height: 88vh;
+}
+dialog::backdrop { background: var(--scrim); backdrop-filter: blur(2px); }
+dialog[open] { animation: pop var(--normal) var(--ease); }
+@keyframes pop {
+  from { transform: scale(0.985) translateY(6px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  padding: var(--s4) var(--s5) var(--s5);
+  max-height: 88vh;
+}
+.dialog-head { display: flex; align-items: center; gap: var(--s3); }
+.dialog-head h2 { font-size: var(--text-lg); flex: 1; }
+.dialog-foot { display: flex; justify-content: flex-end; gap: var(--s2); }
+.dialog-note { font-size: var(--text-sm); color: var(--fg-muted); margin: 0; }
+
+#seed-dialog { width: min(660px, 94vw); }
+#import-dialog { width: min(640px, 94vw); }
+#palette-dialog { width: min(560px, 94vw); margin-top: 12vh; }
+
+.seed-scroll {
+  min-height: 0;
+  max-height: 42vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.seed-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+.seed-table th,
+.seed-table td {
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-base);
+  text-align: left;
+}
+.seed-table tbody tr:last-child td { border-bottom: 0; }
+.seed-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.seed-table .tick { width: 38px; text-align: center; padding-right: 0; }
+.seed-table .num { text-align: right; }
+.seed-table td.name { font-family: var(--font-mono); }
+.seed-table td.dim { color: var(--fg-subtle); font-family: var(--font-mono); font-size: var(--text-sm); }
+.seed-table tr.off td:not(.tick) { opacity: 0.4; }
+
+.seed-controls { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.inline-field { display: flex; align-items: center; gap: var(--s2); }
+.inline-field span { font-size: var(--text-sm); color: var(--fg-muted); white-space: nowrap; }
+.seed-controls input[type="number"] { width: 100px; }
+.seed-total { font-family: var(--font-mono); font-size: var(--text-md); font-weight: 600; }
+
+.alert {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s3);
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-line);
+  color: var(--warn);
+  font-size: var(--text-sm);
+}
+.alert.danger { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger); }
+.alert ul { margin: 0; padding-left: var(--s4); font-family: var(--font-mono); font-size: var(--text-xs); }
+
+.drop {
+  display: grid;
+  place-items: center;
+  gap: var(--s2);
+  padding: var(--s5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  text-align: center;
+  transition: border-color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+.drop.over { border-color: var(--accent); background: var(--accent-soft); color: var(--fg); }
+
+/* Command palette -------------------------------------------------------- */
+
+.palette-search {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--border);
+}
+.palette-search svg { color: var(--fg-subtle); flex: none; }
+.palette-search input { border: 0; background: none; height: 24px; padding: 0; font-size: var(--text-md); }
+.palette-search input:focus { box-shadow: none; }
+
+.palette-list { max-height: 52vh; overflow: auto; padding: var(--s2); }
+.palette-option {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.palette-option:hover { background: var(--surface-2); }
+.palette-option.active { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.palette-option .where { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-subtle); flex: none; }
+.palette-option .what { font-family: var(--font-mono); flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.palette-foot {
+  display: flex;
+  gap: var(--s4);
+  padding: var(--s2) var(--s4);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+  color: var(--fg-subtle);
+}
+.palette-foot span { display: flex; align-items: center; gap: var(--s1); }
+
+/* ==========================================================================
+   Overlays
+   ========================================================================== */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: var(--s5);
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  max-width: min(560px, 90vw);
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  font-size: var(--text-base);
+  animation: toast-in var(--normal) var(--ease);
+}
+@keyframes toast-in {
+  from { transform: translate(-50%, 8px); opacity: 0; }
+  to { transform: translateX(-50%); opacity: 1; }
+}
+.toast.good { border-color: var(--accent-line); }
+.toast.good .dot { background: var(--accent); }
+.toast.bad { border-color: var(--danger-line); color: var(--danger); }
+.toast.bad .dot { background: var(--danger); }
+.toast .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-subtle); flex: none; }
+
+.busy {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--s3);
+  background: var(--scrim);
+  backdrop-filter: blur(2px);
+  font-size: var(--text-base);
+}
+.spinner {
+  width: 26px;
+  height: 26px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ==========================================================================
+   Responsive
+   ========================================================================== */
+
+@media (max-width: 1100px) {
+  .preview.with-inspector { right: 0; }
+}
+@media (max-width: 860px) {
+  .target .dsn { display: none; }
+  .bar { gap: var(--s2); }
+  .hide-narrow { display: none !important; }
+}
+
+/* ---------- run progress ----------
+   Drawn onto the card itself rather than in a single status bar: with five
+   tables seeding in sequence, the useful question is which one is working and
+   how far it has got, and only the card can answer that in place. */
+
+.table.busy { border-color: var(--accent); }
+
+.progress {
+  position: relative;
+  height: 18px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent-soft);
+  border-right: 1px solid var(--accent);
+  transition: width var(--fast) linear;
+}
+.progress-text {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+/* The count the last run wrote, left on the card. */
+.wrote {
+  flex: none;
+  padding: 1px var(--s2);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.wrote.dry { border-color: var(--border); background: var(--surface-3); color: var(--fg-muted); }
+
+/* While a run is in flight the canvas stops responding to edits, so it should
+   not look like it will. */
+.board.running .col { cursor: default; }
+.board.running .rows-input { pointer-events: none; opacity: 0.5; }
+
+/* ---------- table hue picker ---------- */
+
+.swatch {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+  background: var(--hue);
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.swatch:hover { transform: scale(1.15); }
+
+/* Uses the native popover API: top layer, light dismiss, and Escape all come
+   free, and there is no z-index arms race with the dragged card. */
+.hue-menu {
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  inset: auto;
+}
+.hue-menu::backdrop { background: transparent; }
+.hue-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s2); }
+.hue-dot {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform var(--fast) var(--ease);
+}
+.hue-dot:hover { transform: scale(1.12); }
+.hue-dot[aria-checked="true"] { border-color: var(--fg); }
+.hue-dot[data-hue="0"] { background: var(--h0); }
+.hue-dot[data-hue="1"] { background: var(--h1); }
+.hue-dot[data-hue="2"] { background: var(--h2); }
+.hue-dot[data-hue="3"] { background: var(--h3); }
+.hue-dot[data-hue="4"] { background: var(--h4); }
+.hue-dot[data-hue="5"] { background: var(--h5); }
+.hue-dot[data-hue="6"] { background: var(--h6); }
+.hue-dot[data-hue="7"] { background: var(--h7); }
+
+/* ==========================================================================
+   Schema editor
+
+   A draft table is drawn as a card like any other, dashed to say it does not
+   exist yet. Pending drops are struck through in place rather than removed, so
+   the diagram keeps showing where the change lands until it is applied.
+   ========================================================================== */
+
+.table.draft {
+  border-style: dashed;
+  border-left-style: solid;
+  background: color-mix(in srgb, var(--surface) 92%, var(--hue-soft));
+}
+
+.table.dropping { opacity: 0.55; }
+.table.dropping .table-name { text-decoration: line-through; }
+
+.col.dropping .col-name {
+  opacity: 0.55;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.draft-name {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+/* An editable column needs more room than a settled one, so it wraps to two
+   rows rather than squeezing four controls onto one. */
+.col-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s2);
+  cursor: default;
+  background: color-mix(in srgb, var(--surface-2) 60%, transparent);
+}
+.col-edit:hover { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
+
+.col-edit-name, .col-edit-ref, .col-edit-type {
+  height: 24px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.col-edit-name { flex: 1 1 96px; min-width: 0; }
+.col-edit-type { flex: 0 1 auto; max-width: 128px; }
+.col-edit-ref { flex: 1 1 100%; }
+
+.col-flags { display: flex; gap: 2px; }
+
+.flag {
+  height: 24px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+.flag.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.col-drop {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-subtle);
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+.col-drop:hover { background: var(--danger-soft); color: var(--danger); }
+.col-drop.on { color: var(--danger); }
+
+.btn.danger-quiet { color: var(--danger); }
+
+/* The SQL preview. It scrolls in both directions rather than wrapping: a
+   wrapped statement is harder to read than one that needs a scroll. */
+.sql {
+  max-height: 46vh;
+  margin: 0;
+  padding: var(--s3);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  white-space: pre;
+}
+
+/* ==========================================================================
+   Focus
+
+   Clicking a table lights it, the tables it joins to, and the edges between
+   them. Twenty cards is past the point where a line can be followed by eye,
+   and the glow is the table's own hue, so the answer is legible without a
+   legend.
+   ========================================================================== */
+
+.tables.focusing .table { opacity: 0.32; transition: opacity var(--fast) var(--ease); }
+
+.tables.focusing .table.focused,
+.tables.focusing .table.linked { opacity: 1; }
+
+.table.focused {
+  border-color: var(--hue);
+  box-shadow:
+    0 0 0 1px var(--hue),
+    0 0 12px color-mix(in srgb, var(--hue) 70%, transparent),
+    0 0 36px color-mix(in srgb, var(--hue) 42%, transparent);
+}
+
+/* A joined table glows in its own colour, more faintly: it is the answer, not
+   the question. */
+.table.linked {
+  border-color: color-mix(in srgb, var(--hue) 70%, var(--border));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--hue) 32%, transparent);
+}
+
+.table.focused .table-name { color: var(--hue); }
+
+/* The lit edge is the same idea in one dimension: full opacity, thicker, and a
+   glow in the stroke's own colour rather than a flat highlight. */
+.edge.lit {
+  opacity: 1;
+  stroke-width: 2.25;
+  filter: drop-shadow(0 0 4px currentColor);
+}
+.edge.lit, .edge-dot { transition: opacity var(--fast) var(--ease); }
+/* The edges are a sibling of .tables, not a descendant, so the dimming class
+   goes on the <svg> itself when the diagram is drawn. */
+.edges.focusing .edge:not(.lit) { opacity: 0.14; }
+.edges.focusing .edge-dot { opacity: 0.3; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tables.focusing .table { transition: none; }
+}
+
+/* ==========================================================================
+   Folded tables
+   ========================================================================== */
+
+.fold {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg-subtle);
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+}
+.fold:hover { color: var(--fg); }
+
+/* A folded card keeps its header and its hue rail, so it is still a landmark
+   on the canvas and still an end for every edge that pointed into it.
+   Its header is then the only thing naming it, so the name gets the room: the
+   row count and the row-count field are what a folded card is least likely to
+   be asked for, and both come back on hover. */
+/* Sized to its name rather than to a fixed width: a folded card whose only
+   content is a name that is cut off says nothing at all. */
+.table.collapsed { width: max-content; min-width: 180px; max-width: 340px; }
+.table.collapsed .table-foot { padding: var(--s1) var(--s3); }
+
+.table.collapsed .table-name {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.table.collapsed .table-count { display: none; }
+
+.table.collapsed .rows-input {
+  width: 0;
+  padding: 0;
+  border-color: transparent;
+  opacity: 0;
+  transition: width var(--fast) var(--ease), opacity var(--fast) var(--ease);
+}
+.table.collapsed:hover .rows-input,
+.table.collapsed:focus-within .rows-input {
+  width: 60px;
+  padding: 0 var(--s2);
+  border-color: var(--border);
+  opacity: 1;
+}
+
+/* ==========================================================================
+   Relationship notation
+   ========================================================================== */
+
+.edge-foot {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.55;
+  pointer-events: none;
+}
+.edge-foot.lit { opacity: 1; stroke-width: 2; }
+.edges.focusing .edge-foot:not(.lit) { opacity: 0.14; }
+
+/* ==========================================================================
+   Settings
+   ========================================================================== */
+
+/* Three options shown as three buttons. A dropdown would hide two of them
+   behind a click, and all three are worth reading before choosing. */
+.choice { display: flex; gap: var(--s1); flex-wrap: wrap; }
+
+.choice-item {
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.choice-item:hover { color: var(--fg); border-color: var(--fg-subtle); }
+.choice-item.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ==========================================================================
+   Context menu
+   ========================================================================== */
+
+.ctx-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 184px;
+  padding: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+
+.ctx-item {
+  display: block;
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ctx-item:hover, .ctx-item:focus-visible { background: var(--surface-2); outline: none; }
+.ctx-item.danger { color: var(--danger); }
+.ctx-item.danger:hover { background: var(--danger-soft); }
+
+.ctx-rule { height: 1px; margin: var(--s1) var(--s2); background: var(--border); }
+
+/* ==========================================================================
+   Column reordering
+   ========================================================================== */
+
+.col[draggable="true"] { cursor: grab; }
+.col.dragging-col { opacity: 0.4; cursor: grabbing; }
+
+/* The drop line, on the edge the column would land against. A line rather than
+   a highlight on the row: the question is where it goes, not what it replaces. */
+.col.drop-above { box-shadow: inset 0 2px 0 var(--accent); }
+.col.drop-below { box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* The editable rows are full of inputs, and a draggable row swallows the
+   text selection inside them. */
+.col-edit { -webkit-user-drag: none; }
+
+/* ==========================================================================
+   Motion
+
+   The diagram is redrawn wholesale on nearly every edit, so nothing here
+   animates on render: a card that fades in each time a row count changes reads
+   as a stutter, not as polish. Entrances are marked by the script and run once,
+   for cards that are actually new.
+   ========================================================================== */
+
+/* A card arrives from slightly below and slightly small. The stagger is by
+   position in the diagram, so the schema assembles left to right rather than
+   flashing into place. */
+.table.entering {
+  animation: card-in var(--travel) var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 38ms);
+}
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.table {
+  transition:
+    box-shadow var(--normal) var(--ease-out),
+    border-color var(--normal) var(--ease-out),
+    opacity var(--normal) var(--ease-out);
+}
+.table:hover { box-shadow: var(--shadow-2); }
+.table.dragging { transition: none; }
+
+/* The focused card breathes once. A continuous pulse on a canvas someone is
+   reading is a distraction; one beat is an answer. */
+.table.focused { animation: focus-beat 900ms var(--ease-out); }
+@keyframes focus-beat {
+  0%   { transform: scale(1); }
+  38%  { transform: scale(1.018); }
+  100% { transform: scale(1); }
+}
+
+.tables.focusing .table {
+  transition: opacity var(--normal) var(--ease-out), box-shadow var(--normal) var(--ease-out);
+}
+
+/* Zoom steps from the rail and the keyboard glide; zoom from the wheel does
+   not, because a transition on a continuous gesture lags a frame behind the
+   pointer and feels like drag rather than polish. */
+.diagram.zooming { transition: transform var(--slow) var(--ease-out); }
+
+/* Panels arrive settling rather than stopping. */
+.inspector { animation: inspector-in var(--travel) var(--ease-out); }
+@keyframes inspector-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: none; }
+}
+
+.preview { animation: preview-in var(--travel) var(--ease-out); }
+@keyframes preview-in {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: none; }
+}
+
+dialog[open] { animation: dialog-in var(--slow) var(--ease-spring); }
+.ctx-menu { animation-duration: var(--normal); }
+@keyframes dialog-in {
+  from { opacity: 0; transform: scale(0.96) translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* The backdrop fades and blurs, which is what separates a modal from a box
+   that happens to be on top. */
+dialog::backdrop {
+  background: color-mix(in srgb, #000 46%, transparent);
+  backdrop-filter: blur(2px);
+  animation: backdrop-in var(--normal) var(--ease-out);
+}
+@keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+
+.ctx-menu { animation: menu-in 140ms var(--ease-out); transform-origin: top left; }
+@keyframes menu-in {
+  from { opacity: 0; transform: scale(0.96) translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.toast { animation: toast-rise var(--travel) var(--ease-spring); }
+@keyframes toast-rise {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Buttons take the press rather than the hover: a hover that moves things is
+   noise on a page with this many controls. */
+.btn { transition: background var(--fast) var(--ease-out), border-color var(--fast) var(--ease-out), transform var(--fast) var(--ease-out); }
+.btn:active { transform: scale(0.97); }
+
+.choice-item, .ctx-item { transition: background var(--fast) var(--ease-out), color var(--fast) var(--ease-out); }
+
+/* A slower, softer flow than the first pass: the dashes drift rather than
+   race, which reads as data moving instead of as a barber's pole. */
+/* Slow enough to watch a dash travel the length of a line rather than to see a
+   texture vibrate. */
+.edge.flow { animation: edge-flow 2.4s linear infinite; }
+.edge-comet { animation: comet-fade 2.6s var(--ease-out) infinite; }
+@keyframes comet-fade {
+  0%, 100% { opacity: 0; }
+  16%, 78% { opacity: 1; }
+}
+
+/* One switch for everything above. Motion is a preference the operating system
+   already carries, and a tool that ignores it is not premium. */
+@media (prefers-reduced-motion: reduce) {
+  .table.entering,
+  .table.focused,
+  .inspector,
+  .preview,
+  dialog[open],
+  dialog::backdrop,
+  .ctx-menu,
+  .toast,
+  .edge.flow,
+  .edge-comet {
+    animation: none;
+  }
+  .diagram.zooming { transition: none; }
+  .btn:active { transform: none; }
+}
+
+/* ==========================================================================
+   Finish
+
+   The last pass over the surfaces. Nothing structural: depth where depth means
+   something, and none where it does not.
+   ========================================================================== */
+
+/* The canvas gets a vignette so the dot grid falls away at the edges and the
+   cards sit in the middle of something rather than on a tiled wall. */
+.board {
+  background-image:
+    radial-gradient(circle at 50% 40%, transparent 0%, color-mix(in srgb, var(--bg) 55%, #000) 130%),
+    radial-gradient(circle, var(--border) 1px, transparent 1px);
+  background-size: 100% 100%, 22px 22px;
+  background-attachment: local, local;
+}
+
+/* A card is lit from above: the header carries the table's hue as a wash that
+   fades into the body, which is what makes the rail read as an edge-light
+   rather than as a stripe someone drew on. */
+.table-head {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--hue) 16%, transparent) 0%,
+      color-mix(in srgb, var(--hue) 5%, transparent) 100%),
+    var(--surface);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 6%, transparent);
+}
+
+.table {
+  box-shadow:
+    var(--shadow-1),
+    inset 0 1px 0 color-mix(in srgb, #fff 4%, transparent);
+}
+.table:hover {
+  box-shadow:
+    var(--shadow-2),
+    inset 0 1px 0 color-mix(in srgb, #fff 6%, transparent);
+}
+
+/* The hue rail glows very slightly, so a colour is legible at 40% zoom where
+   three pixels of border is all that is left of it. */
+.table { border-left-color: var(--hue); }
+.table:hover { border-left-color: color-mix(in srgb, var(--hue) 85%, #fff); }
+
+/* Glass, done once and reused: the floating surfaces should agree with each
+   other or the page looks assembled from parts. */
+.zoom-rail, .ctx-menu, .hue-menu, .toast {
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: blur(10px) saturate(140%);
+  border-color: color-mix(in srgb, var(--border) 80%, transparent);
+}
+
+dialog {
+  box-shadow:
+    var(--shadow-3),
+    inset 0 1px 0 color-mix(in srgb, #fff 6%, transparent);
+}
+
+/* The generator badges are the densest thing on the canvas. Softening their
+   fill and keeping the colour in the text is what stops twenty cards reading
+   as confetti. */
+.gen { background: color-mix(in srgb, var(--surface-2) 70%, transparent); }
+
+/* A column row lights along its leading edge on hover, in the table's own
+   colour, which ties the row to the card it belongs to. */
+.col:hover { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--hue) 60%, transparent); }
+.col.selected:hover { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Focus rings, once, for every control. Keyboard users get a visible target
+   and pointer users never see it. */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* A column dragged onto another table's column draws a relationship rather
+   than reordering, so the drop target is outlined whole instead of edged. */
+.col.drop-link {
+  background: var(--link-soft);
+  box-shadow: inset 0 0 0 1px var(--link);
+}
+
+/* ==========================================================================
+   Picker groups
+   ========================================================================== */
+
+.picker-group {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: 0;
+  background: transparent;
+  color: var(--fg-subtle);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+}
+.picker-group:hover { color: var(--fg); }
+.picker-caret { width: 8px; font-size: 8px; }
+.picker-group-name { flex: 1; min-width: 0; }
+.picker-group-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: 0;
+  opacity: 0.7;
+}
+.picker-group.folded { opacity: 0.75; }
+
+/* A select styled like the other fields, so the inspector reads as one form
+   rather than as a form with a browser control dropped into it. */
+.select {
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.select:focus { border-color: var(--accent); }
+
+/* The line takes the pointer, so it can be dragged as well as clicked. */
+.edge-hit { cursor: grab; }
+.edge-hit:active { cursor: grabbing; }
+
+/* ==========================================================================
+   Schema history
+   ========================================================================== */
+
+.history { max-height: 52vh; overflow: auto; display: flex; flex-direction: column; gap: var(--s2); }
+
+.history-item {
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.history-head { display: flex; align-items: baseline; gap: var(--s2); }
+
+.history-source {
+  padding: 1px var(--s2);
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.history-version { font-family: var(--font-mono); font-size: var(--text-sm); }
+.history-when { font-size: var(--text-xs); color: var(--fg-subtle); }
+.history-name { margin-top: var(--s1); font-size: var(--text-sm); color: var(--fg-muted); }
+.history-bad { margin-top: var(--s1); font-size: var(--text-xs); color: var(--danger); }
+
+.history-sql { margin-top: var(--s2); }
+.history-sql summary { cursor: pointer; font-size: var(--text-xs); color: var(--fg-subtle); }
+.history-sql summary:hover { color: var(--fg); }
+.history-sql .sql { margin-top: var(--s2); max-height: 30vh; }
+
+#history-dialog { width: min(660px, 94vw); }

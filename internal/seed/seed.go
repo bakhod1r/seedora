@@ -1,0 +1,578 @@
+// Package seed executes a plan against a database.
+//
+// The run is one transaction from the first row to the last, so a failure
+// anywhere leaves the database exactly as it was. Within it, tables are written
+// parents first, and a child's foreign keys are drawn from the parent keys this
+// run actually wrote — not from a guess at what the parent ids will be.
+//
+// Generation runs on a worker pool ahead of the writer, and each table is a
+// single bulk write, so the database's only job is to take rows off the wire.
+package seed
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"iter"
+	"math/rand/v2"
+	"sync"
+	"time"
+
+	"github.com/bakhod1r/synth"
+
+	"github.com/bakhod1r/seedora/internal/db"
+	"github.com/bakhod1r/seedora/internal/model"
+	"github.com/bakhod1r/seedora/internal/plan"
+)
+
+// Options tune one run.
+type Options struct {
+	// Seed fixes the RNG. Zero means "pick one from the clock", and the value
+	// actually used is reported in the Result, so a run can be reproduced after
+	// the fact.
+	Seed uint64
+	// Locale overrides the plan's locale.
+	Locale string
+	// Rows overrides the row count for every table.
+	Rows int
+	// Batch is how many rows one worker generates at a time. It is a unit of
+	// work, not a unit of writing: the table is still one bulk statement.
+	Batch int
+	// Truncate empties every target table first, whatever the plan says.
+	Truncate bool
+	// DryRun generates and validates everything but writes nothing.
+	DryRun bool
+	// Progress is called as rows go past. It may be nil, and it is called from
+	// the writing goroutine, so it must not block.
+	Progress func(Progress)
+}
+
+// Progress is one update during a run.
+type Progress struct {
+	Table      string
+	Written    int
+	Total      int
+	TableIndex int
+	TableCount int
+}
+
+// Result is what a finished run produced.
+type Result struct {
+	Seed     uint64        `json:"seed"`
+	Tables   []TableResult `json:"tables"`
+	Rows     int64         `json:"rows"`
+	Duration time.Duration `json:"duration"`
+	DryRun   bool          `json:"dry_run"`
+}
+
+// RowsPerSecond is the throughput the run achieved.
+func (r *Result) RowsPerSecond() float64 {
+	if r.Duration <= 0 {
+		return 0
+	}
+	return float64(r.Rows) / r.Duration.Seconds()
+}
+
+// TableResult is one table's outcome.
+type TableResult struct {
+	Table string `json:"table"`
+	Rows  int64  `json:"rows"`
+}
+
+// Run executes the plan. The caller owns the driver; Run owns the transaction.
+func Run(ctx context.Context, d db.Driver, s *model.Schema, p *plan.Plan, opts Options) (*Result, error) {
+	if errs := p.Validate(s); len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	order, err := Order(s, p)
+	if err != nil {
+		return nil, err
+	}
+	if opts.Batch <= 0 {
+		opts.Batch = 5000
+	}
+	seedVal := firstNonZero(opts.Seed, p.Seed, uint64(time.Now().UnixNano()))
+	locale := opts.Locale
+	if locale == "" {
+		locale = p.Locale
+	}
+
+	start := time.Now()
+	tx, err := d.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Unconditional: Commit marks the transaction done, so this is a no-op on
+	// the success path and the only thing that runs on every failure path.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	r := &Result{Seed: seedVal, DryRun: opts.DryRun}
+
+	// Truncation runs for every table before any table is written, in reverse
+	// dependency order. Doing it as we go would delete a parent's rows after
+	// its children already pointed at them.
+	if !opts.DryRun {
+		for i := len(order) - 1; i >= 0; i-- {
+			t := order[i]
+			if !opts.Truncate && !p.Tables[t.Name].Truncate {
+				continue
+			}
+			if err := tx.Truncate(ctx, t); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// keys caches parent key columns read back within this transaction, so a
+	// parent referenced by five children costs one query, not five.
+	keys := map[string][]any{}
+
+	for i, t := range order {
+		tp := p.Tables[t.Name]
+		rows := tp.Rows
+		if opts.Rows > 0 {
+			rows = opts.Rows
+		}
+		if rows <= 0 {
+			continue
+		}
+		n, err := seedTable(ctx, tx, s, t, tp, locale, seedVal, rows, i, len(order), keys, opts)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", t.Name, err)
+		}
+		r.Tables = append(r.Tables, TableResult{Table: t.Name, Rows: n})
+		r.Rows += n
+	}
+
+	if opts.DryRun {
+		r.Duration = time.Since(start)
+		return r, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	r.Duration = time.Since(start)
+	return r, nil
+}
+
+// seedTable generates and writes one table as a single bulk write.
+func seedTable(
+	ctx context.Context,
+	tx db.Tx,
+	s *model.Schema,
+	t *model.Table,
+	tp *plan.TablePlan,
+	locale string,
+	baseSeed uint64,
+	rows, index, total int,
+	keys map[string][]any,
+	opts Options,
+) (int64, error) {
+	cols, err := writableColumns(t, tp)
+	if err != nil || len(cols) == 0 {
+		return 0, err
+	}
+
+	gen, err := newGenerator(t, tp, locale, baseSeed, opts.Batch)
+	if err != nil {
+		return 0, err
+	}
+
+	// Foreign keys resolve once per table: every batch draws from the same
+	// parent pool, which keeps children spread evenly over parents rather than
+	// clustered by batch, and costs one query per referenced column.
+	fks, err := resolveFKs(ctx, tx, s, t, tp, keys, opts.DryRun)
+	if err != nil {
+		return 0, err
+	}
+	gen.fks = fks
+	gen.cols = cols
+
+	var src db.Source = newProducer(rows, opts.Batch, gen.batch)
+
+	// Uniqueness is enforced here rather than inside a worker: it is the one
+	// piece of per-table state that every row touches, and a lock around it on
+	// the generating side would serialise the pool it exists to parallelise.
+	// On this side it is already sequential and costs a map lookup per value.
+	if u := newUniqueSet(t, tp, rows); u.active() {
+		src = &uniqueSource{src: src, set: u}
+	}
+
+	if opts.Progress != nil {
+		src = &counted{
+			src:   src,
+			every: opts.Batch,
+			each: func(n int) {
+				opts.Progress(Progress{
+					Table: t.Name, Written: n, Total: rows,
+					TableIndex: index, TableCount: total,
+				})
+			},
+		}
+	}
+
+	if opts.DryRun {
+		return drain(src)
+	}
+	return tx.Insert(ctx, t, cols, src)
+}
+
+// drain consumes a source without writing, for --dry-run. Everything that could
+// fail during a real run — generation, foreign-key resolution, uniqueness —
+// still runs, which is the point of the flag.
+func drain(src db.Source) (int64, error) {
+	var n int64
+	for range src.Rows() {
+		n++
+	}
+	return n, src.Err()
+}
+
+// generator produces one batch of rows for a table. It holds no mutable state
+// that batches share, so several goroutines can call batch concurrently and the
+// result depends only on the batch index.
+type generator struct {
+	table  string
+	tp     *plan.TablePlan
+	cols   []string
+	locale string
+	seed   uint64
+	fks    map[string][]any
+
+	// specs hands each goroutine its own compiled spec. Synth's spec carries a
+	// row count that generation mutates, so one shared instance would race.
+	// Compiling is cheap next to generating a batch, and pooling means it
+	// happens once per worker rather than once per batch.
+	specs *sync.Pool
+	// hasSynth is false when every column is filled by Seedora itself, in which
+	// case Synth is never called at all.
+	hasSynth bool
+
+	// clamp is the declared character limit per text column. A generator knows
+	// what an email looks like but not that this particular column holds 30
+	// characters, and a value one character over is rejected by the database
+	// after the run is already half done.
+	clamp map[string]int
+}
+
+func newGenerator(t *model.Table, tp *plan.TablePlan, locale string, baseSeed uint64, batch int) (*generator, error) {
+	// Each table gets its own seed derived from the run's, so adding a table to
+	// a plan does not shift the data every other table generates.
+	tableSeed := derive(baseSeed, t.Name)
+
+	specYAML, _, err := renderSpec(t.Name, tp, locale, tableSeed)
+	if err != nil {
+		return nil, err
+	}
+
+	g := &generator{
+		table:  t.Name,
+		tp:     tp,
+		locale: localeOr(locale),
+		seed:   tableSeed,
+		clamp:  textLimits(t, tp),
+	}
+	if specYAML == nil {
+		return g, nil
+	}
+
+	// Compile once here so a broken spec fails before any row is written,
+	// rather than inside a worker on the first batch.
+	if _, err := synth.YAMLBytes(specYAML); err != nil {
+		return nil, fmt.Errorf("compile generators: %w", err)
+	}
+	g.hasSynth = true
+	g.specs = &sync.Pool{New: func() any {
+		spec, err := synth.YAMLBytes(specYAML)
+		if err != nil {
+			// Unreachable: the same bytes compiled a moment ago.
+			return err
+		}
+		return spec
+	}}
+	return g, nil
+}
+
+// batch generates rows [offset, offset+n) of the table.
+func (g *generator) batch(index, offset, n int) ([]map[string]any, error) {
+	var rows []map[string]any
+
+	if g.hasSynth {
+		v := g.specs.Get()
+		if err, bad := v.(error); bad {
+			return nil, err
+		}
+		spec := v.(*synth.YAMLSpec)
+		defer g.specs.Put(spec)
+
+		spec.SetCount(n)
+		// Offset is what makes batch two continue where batch one stopped
+		// instead of repeating it: Synth seeds each row from its index, so the
+		// batch's contents follow from its offset and nothing else.
+		var err error
+		rows, err = spec.Generate(
+			synth.WithSeed(g.seed),
+			synth.WithLocale(g.locale),
+			synth.Offset(offset),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("generate: %w", err)
+		}
+		rows = resize(rows, n)
+	} else {
+		rows = make([]map[string]any, n)
+		for i := range rows {
+			rows[i] = make(map[string]any, len(g.cols))
+		}
+	}
+
+	// The batch's own RNG is seeded from its index, so foreign-key draws and
+	// null placement are reproducible no matter which worker ran it or when.
+	r := rand.New(rand.NewPCG(g.seed, uint64(index)+0x9e3779b97f4a7c15))
+	g.fill(rows, offset, r)
+	return rows, nil
+}
+
+// fill applies everything Synth does not: foreign keys, sequences, constants,
+// nulls, and weighted booleans.
+func (g *generator) fill(rows []map[string]any, offset int, r *rand.Rand) {
+	for i, row := range rows {
+		for _, col := range g.cols {
+			cp := g.tp.Columns[col]
+			if cp == nil {
+				continue
+			}
+			switch cp.Generator {
+			case plan.GenForeignKey:
+				pool := g.fks[col]
+				if len(pool) == 0 {
+					row[col] = nil
+				} else {
+					row[col] = pool[r.IntN(len(pool))]
+				}
+			case plan.GenSequence:
+				row[col] = offset + i + 1
+			case plan.GenNull:
+				row[col] = nil
+			case plan.GenConst:
+				row[col] = cp.Const
+			}
+
+			// A weighted boolean is Seedora's own because Synth's bool kind is
+			// a fair coin, and the useful case — 85% active users — is not.
+			if cp.TrueWeight != nil {
+				row[col] = r.Float64() < *cp.TrueWeight
+			}
+
+			// Nulls last, so they override whatever was generated.
+			if cp.NullRate > 0 && r.Float64() < cp.NullRate {
+				row[col] = nil
+				continue
+			}
+
+			if limit, bounded := g.clamp[col]; bounded {
+				row[col] = clampText(row[col], limit)
+			}
+		}
+	}
+}
+
+// textLimits collects the character limit of every text column the plan fills.
+func textLimits(t *model.Table, tp *plan.TablePlan) map[string]int {
+	out := map[string]int{}
+	for _, c := range t.Columns {
+		cp := tp.Get(c.Name)
+		if cp == nil || cp.Skip || c.MaxLen <= 0 {
+			continue
+		}
+		if plan.Classify(c.Type) == model.ClassString {
+			out[c.Name] = c.MaxLen
+		}
+	}
+	return out
+}
+
+// clampText truncates a value to the column's declared width, counting runes so
+// a multi-byte character is never cut in half — half a rune is not text, and
+// some engines reject it outright.
+func clampText(v any, limit int) any {
+	s, ok := v.(string)
+	if !ok || limit <= 0 {
+		return v
+	}
+	if len(s) <= limit {
+		return s
+	}
+	runes := []rune(s)
+	for len(runes) > 0 && len(string(runes)) > limit {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes)
+}
+
+// writableColumns is the column list a bulk write uses: catalog order, minus
+// everything the plan skips and everything the database computes.
+func writableColumns(t *model.Table, tp *plan.TablePlan) ([]string, error) {
+	var out []string
+	for _, c := range t.Columns {
+		cp := tp.Get(c.Name)
+		if cp == nil {
+			// No plan entry. A column the database fills itself is fine to
+			// omit; one it cannot was already rejected by Validate.
+			continue
+		}
+		if cp.Skip || cp.Generator == plan.GenDefault || c.Generated {
+			continue
+		}
+		out = append(out, c.Name)
+	}
+	return out, nil
+}
+
+// resolveFKs builds, per foreign-key column, the pool of parent keys to draw
+// from.
+func resolveFKs(
+	ctx context.Context,
+	tx db.Tx,
+	s *model.Schema,
+	t *model.Table,
+	tp *plan.TablePlan,
+	cache map[string][]any,
+	dryRun bool,
+) (map[string][]any, error) {
+	out := map[string][]any{}
+	for col, cp := range tp.Columns {
+		if cp.Skip || cp.Generator != plan.GenForeignKey {
+			continue
+		}
+		ref := cp.References
+		if ref == "" {
+			c := t.Column(col)
+			if c == nil || c.FK == nil {
+				continue
+			}
+			ref = c.FK.Table + "." + c.FK.Column
+		}
+		parentName, parentCol, ok := plan.SplitRef(ref)
+		if !ok {
+			return nil, fmt.Errorf("column %s: bad reference %q", col, ref)
+		}
+		if k, hit := cache[ref]; hit {
+			out[col] = k
+			continue
+		}
+		parent := s.Table(parentName)
+		if parent == nil {
+			return nil, fmt.Errorf("column %s references unknown table %s", col, parentName)
+		}
+		// The cap bounds memory on a parent with millions of rows. Drawing from
+		// a large sample rather than the whole set changes nothing about
+		// referential integrity and keeps the pool in cache.
+		k, err := tx.ReadKeys(ctx, parent, parentCol, fkPoolCap)
+		if err != nil {
+			return nil, err
+		}
+		if len(k) == 0 && !nullable(t, col) {
+			// A dry run never writes the parent, so its key column is empty by
+			// construction. Standing in a placeholder pool lets the rest of the
+			// plan be exercised, which is the point of the flag; a real run
+			// still fails here, because there it means a genuinely empty parent.
+			if !dryRun {
+				return nil, fmt.Errorf("column %s references %s, which has no rows",
+					col, parentName)
+			}
+			k = placeholderKeys()
+		}
+		cache[ref] = k
+		out[col] = k
+	}
+	return out, nil
+}
+
+func nullable(t *model.Table, col string) bool {
+	c := t.Column(col)
+	return c != nil && c.Nullable
+}
+
+// fkPoolCap is how many parent keys are held per reference.
+const fkPoolCap = 200_000
+
+// placeholderKeys stands in for a parent a dry run has not written. The values
+// are never sent anywhere, so any non-empty pool does.
+func placeholderKeys() []any {
+	out := make([]any, 100)
+	for i := range out {
+		out[i] = int64(i + 1)
+	}
+	return out
+}
+
+// resize trims or pads a generated batch to exactly n rows. Synth generates the
+// count the spec asks for, so this only ever trims — the pad path exists so a
+// future change to that cannot silently write short.
+func resize(batch []map[string]any, n int) []map[string]any {
+	if len(batch) > n {
+		return batch[:n]
+	}
+	for len(batch) < n {
+		batch = append(batch, map[string]any{})
+	}
+	return batch
+}
+
+// uniqueSource enforces uniqueness as rows pass through, in order.
+type uniqueSource struct {
+	src db.Source
+	set *uniqueSet
+	err error
+}
+
+func (u *uniqueSource) Rows() iter.Seq[map[string]any] {
+	return func(yield func(map[string]any) bool) {
+		i := 0
+		for row := range u.src.Rows() {
+			if err := u.set.enforce(row, i); err != nil {
+				u.err = err
+				return
+			}
+			if !yield(row) {
+				return
+			}
+			i++
+		}
+	}
+}
+
+func (u *uniqueSource) Err() error {
+	if u.err != nil {
+		return u.err
+	}
+	return u.src.Err()
+}
+
+// derive mixes a table name into the run seed with FNV-1a, so every table has a
+// distinct, stable stream.
+func derive(seed uint64, name string) uint64 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64) ^ seed
+	for i := 0; i < len(name); i++ {
+		h ^= uint64(name[i])
+		h *= prime64
+	}
+	if h == 0 {
+		return 1
+	}
+	return h
+}
+
+func firstNonZero(vals ...uint64) uint64 {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 1
+}

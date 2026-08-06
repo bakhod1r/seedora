@@ -1,0 +1,26 @@
+version: 2
+
+updates:
+  # Go modules. Grouped into one pull request a week: this project has few
+  # dependencies, and a separate PR per patch bump is noise rather than
+  # diligence.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      go:
+        patterns: ['*']
+    open-pull-requests-limit: 3
+
+  # The workflows pin action versions, which go stale silently and are the most
+  # likely place for a supply-chain problem to arrive.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ['*']

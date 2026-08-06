@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seedora</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 14.5C8 9 5 6.5 1.5 6 1.5 11 4.5 14 8 14.5Z" fill="currentColor" opacity=".55"/>
+      <path d="M8 14.5C8 8 10.5 4 14.5 1.5c.5 6-2.5 11-6.5 13Z" fill="currentColor"/>
+    </svg>
+    <span>Seedora</span>
+  </div>
+
+  <div class="target" id="target" hidden>
+    <span class="engine" id="target-engine"></span>
+    <span class="dsn" id="target-dsn"></span>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="actions">
+    <button id="btn-palette" class="btn btn-quiet" title="Jump to a table or column">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <span class="hide-narrow">Jump to…</span>
+      <kbd class="hide-narrow">⌘K</kbd>
+    </button>
+
+    <button id="btn-settings" class="btn btn-icon" title="Settings" aria-label="Settings">
+      <!-- Sliders, not a gear. A cog's teeth turn to mush at 14px, and these
+           settings are adjustments to how the diagram looks rather than
+           machinery. -->
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M2.5 4.5h3M8.5 4.5h5M2.5 11.5h5M10.5 11.5h3"
+              stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <circle cx="7" cy="4.5" r="1.8" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="9" cy="11.5" r="1.8" stroke="currentColor" stroke-width="1.5"/>
+      </svg>
+    </button>
+
+    <button id="btn-theme" class="btn btn-icon" title="Switch between light and dark" aria-label="Switch theme">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7Z"
+              stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+      </svg>
+    </button>
+
+    <button id="btn-history" class="btn btn-quiet hide-narrow"
+            title="How this schema got like this">History</button>
+    <button id="btn-fold-all" class="btn btn-quiet hide-narrow"
+            title="Fold every table down to its header (c)">Fold all</button>
+    <button id="btn-new-table" class="btn btn-quiet hide-narrow"
+            title="Sketch a new table to seed against">New table</button>
+    <button id="btn-changes" class="btn btn-quiet" hidden
+            title="Review the SQL these edits would run"></button>
+
+    <button id="btn-reset-layout" class="btn btn-quiet hide-narrow"
+            title="Lay the diagram out again from the foreign keys">Tidy up</button>
+    <button id="btn-import" class="btn btn-quiet hide-narrow"
+            title="Load a seedora.yaml into this session">Import</button>
+    <button id="btn-export" class="btn btn-quiet hide-narrow"
+            title="Download the mapping, the schema, or the diagram">Export…</button>
+    <button id="btn-save" class="btn" title="Write the mapping to disk">Save</button>
+    <button id="btn-seed" class="btn btn-primary" title="Choose row counts, then seed">Seed…</button>
+  </div>
+</header>
+
+<!-- The seed dialog owns these; they live here only so the run path has one
+     place to read from. Two visible controls for one setting is one too many. -->
+<input id="run-seed" type="hidden">
+<input id="run-truncate" type="checkbox" hidden>
+
+<div id="problems" class="problems" hidden></div>
+
+<main id="main">
+  <section id="connect" class="connect" hidden>
+    <div class="panel">
+      <h1>Connect a database</h1>
+      <p class="lede">Seedora reads the schema and proposes a generator for every column. Nothing is written until you press Seed.</p>
+
+      <div id="recent" class="recent" hidden>
+        <div class="eyebrow">Recent</div>
+        <ul id="recent-list" class="recent-list"></ul>
+      </div>
+
+      <div class="stack">
+        <div class="field">
+          <label class="field-label" for="dsn">Connection string</label>
+          <input id="dsn" type="text" spellcheck="false" autocomplete="off"
+                 placeholder="postgres://user:pass@localhost:5432/myapp_dev">
+          <p class="field-hint">A plain path works too, for SQLite — <code>./dev.db</code></p>
+        </div>
+
+        <label class="check">
+          <input id="remember" type="checkbox" checked>
+          <span>Remember this connection</span>
+        </label>
+        <label class="check">
+          <input id="keep-password" type="checkbox">
+          <span>Store the password as well</span>
+        </label>
+
+        <p class="field-hint">
+          Remembered connections live in your user config directory, readable only by you —
+          never in <code>seedora.yaml</code>, which is the file you commit. Leave the password
+          unstored and Seedora asks for it each time.
+        </p>
+
+        <button id="btn-connect" class="btn btn-primary btn-wide">Connect</button>
+        <div id="connect-error" class="alert danger" hidden></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="board" class="board" hidden>
+    <!-- The zoom rail is docked to the canvas rather than sitting in the top
+         bar: it belongs to the thing it scales, and at twenty tables it is
+         reached often enough to want to be near the diagram. -->
+    <div class="zoom-rail" role="toolbar" aria-label="Zoom">
+      <button id="btn-zoom-in" class="btn btn-icon" title="Zoom in (+)" aria-label="Zoom in">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <button id="zoom-level" class="zoom-level" title="Back to 100% (0)"
+              aria-label="Zoom level, click for 100%">100%</button>
+      <button id="btn-zoom-out" class="btn btn-icon" title="Zoom out (-)" aria-label="Zoom out">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </button>
+
+      <div class="zoom-rule"></div>
+
+      <button id="btn-zoom-fit" class="btn btn-icon" title="Fit the whole diagram (f)"
+              aria-label="Fit the whole diagram">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <div id="diagram" class="diagram">
+      <svg id="edges" class="edges"></svg>
+      <div id="tables" class="tables"></div>
+    </div>
+  </section>
+</main>
+
+<aside id="inspector" class="inspector" hidden aria-label="Column settings">
+  <div class="inspector-head">
+    <div style="min-width:0; flex:1">
+      <div class="eyebrow" id="insp-table"></div>
+      <h2 id="insp-column"></h2>
+      <div class="inspector-type" id="insp-tags"></div>
+    </div>
+    <button id="insp-close" class="btn btn-icon" aria-label="Close">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="inspector-body">
+    <div class="note" id="insp-why" hidden></div>
+
+    <div class="picker">
+      <div class="field-label">Generator</div>
+      <div class="picker-search">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <input id="gen-filter" type="search" placeholder="Search generators…" autocomplete="off">
+      </div>
+      <div id="gen-list" class="picker-list" role="listbox" aria-label="Generator" tabindex="-1"></div>
+    </div>
+
+    <div id="opts" class="opts"></div>
+
+    <div class="switches">
+      <label class="check">
+        <input id="opt-unique" type="checkbox">
+        <span>Unique across the table</span>
+      </label>
+
+      <div class="field" id="null-field">
+        <span class="field-label">Null rate</span>
+        <div class="slider-row">
+          <input id="opt-null" type="range" min="0" max="100" step="1">
+          <span class="slider-value" id="null-value">0%</span>
+        </div>
+      </div>
+
+      <label class="check">
+        <input id="opt-skip" type="checkbox">
+        <span>Skip — let the database fill it</span>
+      </label>
+    </div>
+  </div>
+</aside>
+
+<section id="preview" class="preview" hidden aria-label="Preview">
+  <div class="preview-head">
+    <h2>Preview <span class="mono muted" id="preview-title"></span></h2>
+    <div class="spacer"></div>
+    <span class="field-hint" id="preview-note"></span>
+    <button id="preview-refresh" class="btn btn-quiet">Regenerate</button>
+    <button id="preview-close" class="btn btn-icon" aria-label="Close">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
+  <div class="preview-scroll"><table id="preview-table" class="data-table"></table></div>
+</section>
+
+<dialog id="seed-dialog" aria-label="Seed">
+  <form method="dialog" class="dialog-form">
+    <div class="dialog-head">
+      <h2>Seed</h2>
+      <button class="btn btn-icon" value="cancel" aria-label="Close">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <p class="dialog-note" id="seed-intro"></p>
+
+    <div class="seed-scroll">
+      <table class="seed-table">
+        <thead>
+          <tr>
+            <th class="tick"><input id="seed-all" type="checkbox" checked aria-label="Include every table"></th>
+            <th>Table</th>
+            <th class="num">Already there</th>
+            <th class="num">Rows to add</th>
+          </tr>
+        </thead>
+        <tbody id="seed-rows"></tbody>
+      </table>
+    </div>
+
+    <div class="seed-controls">
+      <label class="inline-field">
+        <span>Set every table to</span>
+        <input id="seed-bulk" type="number" min="0" placeholder="1000">
+      </label>
+      <button type="button" id="seed-bulk-apply" class="btn">Apply</button>
+      <div class="spacer"></div>
+      <strong class="seed-total" id="seed-total"></strong>
+    </div>
+
+    <div id="seed-warning" class="alert" hidden></div>
+
+    <div class="switches">
+      <label class="check">
+        <input id="seed-truncate" type="checkbox">
+        <span id="seed-truncate-label">Truncate the selected tables first</span>
+      </label>
+      <label class="inline-field">
+        <span>Seed value</span>
+        <input id="seed-value" type="number" min="0" placeholder="random" style="width:120px">
+        <span class="field-hint">Fix it to reproduce this run exactly.</span>
+      </label>
+    </div>
+
+    <div class="dialog-foot">
+      <button value="cancel" class="btn btn-quiet">Cancel</button>
+      <button type="button" id="seed-dry" class="btn">Dry run</button>
+      <button type="button" id="seed-go" class="btn btn-primary">Seed</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="import-dialog" aria-label="Import a mapping">
+  <form method="dialog" class="dialog-form">
+    <div class="dialog-head">
+      <h2>Import</h2>
+      <button class="btn btn-icon" value="cancel" aria-label="Close">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <p class="dialog-note">
+      A <code>seedora.yaml</code> is merged against the schema you are connected to: choices for
+      columns that still exist are kept, new columns get a proposal, and columns the database no
+      longer has are dropped. A <code>.sql</code> file is read as a schema instead — its tables
+      become drafts, and you see the SQL before anything is created.
+    </p>
+
+    <div id="drop" class="drop">
+      <span>Drop a <code>seedora.yaml</code> or a <code>.sql</code> schema here</span>
+      <input id="import-file" type="file" accept=".yaml,.yml,.sql,text/yaml,application/sql" hidden>
+      <button type="button" id="btn-browse" class="btn">Choose a file…</button>
+    </div>
+
+    <textarea id="import-text" spellcheck="false" rows="10"
+              placeholder="version: 1&#10;tables:&#10;  users:&#10;    rows: 10000&#10;    columns:&#10;      email: {generator: email, unique: true}"></textarea>
+
+    <label class="check">
+      <input id="import-replace" type="checkbox">
+      <span>Replace instead of merging — use the file exactly as written</span>
+    </label>
+
+    <div id="import-error" class="alert danger" hidden></div>
+
+    <div class="dialog-foot">
+      <button value="cancel" class="btn btn-quiet">Cancel</button>
+      <button type="button" id="btn-do-import" class="btn btn-primary">Import</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Schema changes are shown as SQL before they run. The tool edits a database
+     someone is working in, and "trust me" is not an acceptable preview. -->
+<dialog id="schema-dialog" aria-label="Apply schema changes">
+  <form method="dialog" class="dialog-form">
+    <div class="dialog-head">
+      <h2>Apply schema changes</h2>
+      <button class="btn btn-icon" value="cancel" aria-label="Close">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <p class="dialog-note" id="schema-note"></p>
+    <div id="schema-error" class="alert danger" hidden></div>
+    <pre id="schema-sql" class="sql"></pre>
+
+    <div class="dialog-foot">
+      <button value="cancel" class="btn btn-quiet">Cancel</button>
+      <button type="button" id="schema-apply" class="btn btn-primary">Apply</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- A database keeps no record of the DDL that shaped it. What this shows is
+     whatever a migration tool wrote into its own bookkeeping table, plus the
+     changes Seedora applied itself — which no migration tool knows about. -->
+<dialog id="history-dialog" aria-label="Schema history">
+  <form method="dialog" class="dialog-form">
+    <div class="dialog-head">
+      <h2>Schema history</h2>
+      <button class="btn btn-icon" value="cancel" aria-label="Close">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <p class="dialog-note" id="history-note"></p>
+    <div id="history-error" class="alert danger" hidden></div>
+    <div id="history-list" class="history"></div>
+
+    <div class="dialog-foot">
+      <button value="cancel" class="btn btn-primary">Done</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="settings-dialog" aria-label="Settings">
+  <form method="dialog" class="dialog-form">
+    <div class="dialog-head">
+      <h2>Settings</h2>
+      <button class="btn btn-icon" value="cancel" aria-label="Close">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <p class="dialog-note">
+      These are display choices. They live in this browser and change nothing about
+      what a run writes.
+    </p>
+
+    <div class="field">
+      <span class="field-label">Relationship notation</span>
+      <div id="notation-choice" class="choice" role="radiogroup" aria-label="Relationship notation"></div>
+      <p class="field-hint" id="notation-hint"></p>
+    </div>
+
+    <div class="field">
+      <span class="field-label">Data flow animation</span>
+      <div id="flow-choice" class="choice" role="radiogroup" aria-label="Data flow animation"></div>
+      <p class="field-hint" id="flow-hint"></p>
+    </div>
+
+    <div class="dialog-foot">
+      <button value="cancel" class="btn btn-primary">Done</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="palette-dialog" aria-label="Jump to">
+  <div class="palette-search">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    <input id="palette-input" type="text" placeholder="Jump to a table or column…" autocomplete="off" spellcheck="false">
+  </div>
+  <div id="palette-list" class="palette-list" role="listbox" aria-label="Results"></div>
+  <div class="palette-foot">
+    <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+    <span><kbd>↵</kbd> open</span>
+    <span><kbd>esc</kbd> close</span>
+  </div>
+</dialog>
+
+<!-- One dialog stands in for confirm() and prompt(). Those block the event loop,
+     cannot be styled, and are throttled or suppressed by some browsers — which
+     would silently turn a destructive confirmation into no confirmation. -->
+<dialog id="ask-dialog" aria-labelledby="ask-title">
+  <form method="dialog" class="dialog-form">
+    <div class="dialog-head">
+      <h2 id="ask-title"></h2>
+    </div>
+    <p class="dialog-note" id="ask-body"></p>
+    <div id="ask-alert" class="alert danger" hidden></div>
+    <div class="field" id="ask-field" hidden>
+      <label class="field-label" for="ask-input" id="ask-label"></label>
+      <input id="ask-input" type="password" autocomplete="current-password">
+    </div>
+    <div class="dialog-foot">
+      <button value="cancel" class="btn btn-quiet" id="ask-cancel">Cancel</button>
+      <button type="button" class="btn btn-primary" id="ask-ok">Continue</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- The application's own context menu. The browser's has nothing useful to
+     offer over a canvas of cards, and the actions people reach for here —
+     preview, fold, drop — are all a right-click away in every tool that draws
+     diagrams. -->
+<div id="ctx-menu" class="ctx-menu" hidden role="menu" aria-label="Actions"></div>
+
+<div id="hue-menu" class="hue-menu" popover="auto">
+  <div id="hue-grid" class="hue-grid" role="radiogroup" aria-label="Table colour"></div>
+</div>
+
+<div id="toast" class="toast" hidden><span class="dot"></span><span id="toast-text"></span></div>
+<div id="busy" class="busy" hidden><div class="spinner"></div><span id="busy-text"></span></div>
+
+<script src="app.js"></script>
+</body>
+</html>

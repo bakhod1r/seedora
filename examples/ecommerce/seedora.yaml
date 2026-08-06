@@ -1,0 +1,194 @@
+# The mapping for the example schema, committed so every developer and every CI
+# run gets the same database. Row counts keep the proportions a real shop has:
+# more order items than orders, more orders than users, and an audit log that
+# dwarfs both.
+#
+#   seedora run --dsn ./shop.db --config ./seedora.yaml --truncate --seed 42
+#
+version: 1
+locale: en_US
+tables:
+  addresses:
+    rows: 2600
+    columns:
+      id: {generator: default, skip: true}
+      user_id: {generator: foreign_key, references: users.id}
+      country_id: {generator: foreign_key, references: countries.id}
+      line1: {generator: sentence, max: 120}
+      line2: {generator: sentence, max: 120, null_rate: 0.05}
+      city: {generator: city, max: 60}
+      postcode: {generator: postcode, max: 16}
+  audit_log:
+    rows: 30000
+    columns:
+      id: {generator: default, skip: true}
+      user_id: {generator: foreign_key, references: users.id}
+      action: {generator: word, max: 40}
+      entity: {generator: word, max: 40}
+      entity_id: {generator: int}
+      at: {generator: time}
+  cart_items:
+    rows: 2700
+    columns:
+      id: {generator: default, skip: true}
+      cart_id: {generator: foreign_key, references: carts.id}
+      variant_id: {generator: foreign_key, references: product_variants.id}
+      quantity: {generator: int}
+  carts:
+    rows: 900
+    columns:
+      id: {generator: default, skip: true}
+      user_id: {generator: foreign_key, references: users.id}
+      created_at: {generator: time}
+  categories:
+    rows: 80
+    columns:
+      id: {generator: default, skip: true}
+      parent_id: {generator: foreign_key, references: categories.id}
+      name: {generator: word, max: 80}
+      slug: {generator: slug, unique: true, max: 80}
+  countries:
+    rows: 60
+    columns:
+      id: {generator: default, skip: true}
+      code: {generator: word, unique: true, max: 2}
+      name: {generator: word, max: 80}
+  coupons:
+    rows: 40
+    columns:
+      id: {generator: default, skip: true}
+      code: {generator: word, unique: true, max: 24}
+      percent_off: {generator: int}
+      expires_at: {generator: cardexpiry, null_rate: 0.05}
+  inventory:
+    rows: 4000
+    columns:
+      id: {generator: default, skip: true}
+      variant_id: {generator: foreign_key, references: product_variants.id}
+      warehouse_id: {generator: foreign_key, references: warehouses.id}
+      quantity: {generator: int}
+      updated_at: {generator: time}
+  order_items:
+    rows: 24000
+    columns:
+      id: {generator: default, skip: true}
+      order_id: {generator: foreign_key, references: orders.id}
+      variant_id: {generator: foreign_key, references: product_variants.id}
+      quantity: {generator: int}
+      unit_price: {generator: float, min: 0, max: 99999999}
+  orders:
+    rows: 8000
+    columns:
+      id: {generator: default, skip: true}
+      user_id: {generator: foreign_key, references: users.id}
+      billing_address_id: {generator: foreign_key, references: addresses.id}
+      shipping_address_id: {generator: foreign_key, references: addresses.id}
+      coupon_id: {generator: foreign_key, references: coupons.id}
+      status: {generator: orderstatus, max: 20}
+      total: {generator: amount, min: 0, max: 99999999}
+      placed_at: {generator: time}
+  payments:
+    rows: 8000
+    columns:
+      id: {generator: default, skip: true}
+      order_id: {generator: foreign_key, references: orders.id}
+      method: {generator: httpmethod, max: 20}
+      amount: {generator: amount, min: 0, max: 99999999}
+      paid_at: {generator: time, null_rate: 0.05}
+  product_tags:
+    rows: 2400
+    columns:
+      product_id: {generator: foreign_key, references: products.id}
+      tag_id: {generator: foreign_key, references: tags.id}
+  product_variants:
+    rows: 3600
+    columns:
+      id: {generator: default, skip: true}
+      product_id: {generator: foreign_key, references: products.id}
+      sku: {generator: sku, unique: true, max: 32}
+      colour: {generator: color, max: 30, null_rate: 0.05}
+      size: {generator: tshirtsize, max: 20, null_rate: 0.05}
+      price: {generator: amount, min: 0, max: 99999999}
+  products:
+    rows: 1200
+    columns:
+      id: {generator: default, skip: true}
+      category_id: {generator: foreign_key, references: categories.id}
+      supplier_id: {generator: foreign_key, references: suppliers.id}
+      sku: {generator: sku, unique: true, max: 32}
+      name: {generator: word, max: 120}
+      description: {generator: sentence, null_rate: 0.05}
+      price: {generator: amount, min: 0, max: 99999999}
+      weight_kg: {generator: float, null_rate: 0.05}
+      created_at: {generator: time}
+  reviews:
+    rows: 5000
+    columns:
+      id: {generator: default, skip: true}
+      product_id: {generator: foreign_key, references: products.id}
+      user_id: {generator: foreign_key, references: users.id}
+      rating: {generator: rating}
+      body: {generator: sentence, null_rate: 0.05}
+      created_at: {generator: time}
+  shipments:
+    rows: 7200
+    columns:
+      id: {generator: default, skip: true}
+      order_id: {generator: foreign_key, references: orders.id}
+      warehouse_id: {generator: foreign_key, references: warehouses.id}
+      tracking: {generator: word, max: 40, null_rate: 0.05}
+      shipped_at: {generator: time, null_rate: 0.05}
+  suppliers:
+    rows: 50
+    columns:
+      id: {generator: default, skip: true}
+      name: {generator: word, max: 120}
+      email: {generator: email, max: 120}
+      country_id: {generator: foreign_key, references: countries.id}
+  support_tickets:
+    rows: 900
+    columns:
+      id: {generator: default, skip: true}
+      user_id: {generator: foreign_key, references: users.id}
+      order_id: {generator: foreign_key, references: orders.id}
+      subject: {generator: sentence, max: 140}
+      status: {generator: orderstatus, max: 20}
+      opened_at: {generator: time}
+  tags:
+    rows: 40
+    columns:
+      id: {generator: default, skip: true}
+      name: {generator: word, unique: true, max: 40}
+  ticket_messages:
+    rows: 2600
+    columns:
+      id: {generator: default, skip: true}
+      ticket_id: {generator: foreign_key, references: support_tickets.id}
+      user_id: {generator: foreign_key, references: users.id}
+      body: {generator: sentence}
+      sent_at: {generator: time}
+  user_profiles:
+    rows: 2000
+    columns:
+      user_id: {generator: foreign_key, references: users.id}
+      bio: {generator: sentence, null_rate: 0.05}
+      avatar_url: {generator: sentence, max: 200, null_rate: 0.05}
+      locale: {generator: word, max: 10}
+  users:
+    rows: 2000
+    columns:
+      id: {generator: default, skip: true}
+      email: {generator: email, unique: true, max: 120}
+      first_name: {generator: firstname, max: 50}
+      last_name: {generator: lastname, max: 50}
+      phone: {generator: phone, max: 30, null_rate: 0.05}
+      country_id: {generator: foreign_key, references: countries.id}
+      is_active: {generator: bool, true_weight: 0.5}
+      created_at: {generator: time}
+  warehouses:
+    rows: 8
+    columns:
+      id: {generator: default, skip: true}
+      name: {generator: word, max: 80}
+      city: {generator: city, max: 60}
+      country_id: {generator: foreign_key, references: countries.id}
