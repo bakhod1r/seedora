@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo_transparent.png" alt="Seedora" width="200" height="200">
+  <img src="assets/logo.png" alt="Seedora" width="200" height="200">
 </p>
 
 <h1 align="center">Seedora</h1>
