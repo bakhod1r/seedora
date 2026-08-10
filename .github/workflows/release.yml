@@ -21,9 +21,9 @@ jobs:
           - { goos: windows, goarch: amd64 }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -59,7 +59,7 @@ jobs:
           # Checksums per artefact, joined into one file by the release job.
           sha256sum "${base}".* > "${base}.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: seedora-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -71,9 +71,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -96,7 +96,7 @@ jobs:
             echo "No CHANGELOG section for ${GITHUB_REF_NAME}." > notes.md
           fi
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           body_path: notes.md
           files: |
