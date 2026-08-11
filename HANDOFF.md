@@ -126,6 +126,57 @@ schema instead of overwriting it, `plan.Merge` no longer replaces it, and
 `spec.columnOrder` prefers it. A bulk load still writes in catalog order, which
 is what the wire protocol expects.
 
+- **Undo** covers plan edits, fed from `pushPlan` — the one place that knows an
+  edit happened and the server took it. The whole plan is snapshotted rather
+  than a diff, bounded at 25; an edit the server refused records nothing, and a
+  failed undo restores the stack. Schema changes are deliberately not covered:
+  they are applied in a transaction after a SQL review, and undoing an applied
+  `DROP TABLE` would mean inventing a table this tool never saw.
+
+## Undo shipped with seven known defects
+
+A whole-branch review of the undo work recommended against merging it. It was
+merged anyway, deliberately, so these are open and this is the list. Two of
+them lose a user's work in ordinary use.
+
+- **`history.base` goes stale whenever the plan changes outside `pushPlan`,
+  `undo`, or `redo`.** `applyState` replaces `app.plan` and does not touch
+  `base`. Import, schema apply, the post-run state refresh, and `importSchema`
+  all take that path, and none of them changes `s.target`, so the reconnect
+  check does not fire either. Edit, then import a `seedora.yaml`, then change
+  one generator: a single undo throws the imported mapping away, and Save
+  writes that to disk. The fix is to make `applyState` the one place that
+  maintains `base`, and to `resetHistory()` on a successful import or schema
+  apply — those snapshots are no longer edits of the current plan.
+- **Nothing serialises in-flight plan requests.** Holding Cmd-Z autorepeats, so
+  a second `undo` starts while the first is still in flight: `future` gets two
+  entries holding the same plan, a redo step is lost, and two PUTs race a
+  last-write-wins server. Two fast edits have the same shape. A flag or a
+  promise chain over the three functions closes it.
+- **The commonest undo label is the string "undefined".** `commit()` builds it
+  from `cur.column`, and `current()` returns `{t, c, cp}` — no such property.
+  Every generator change toasts "Undid undefined settings". It should be
+  `cur.c.name`.
+- **The failure path aliases rather than clones.** `undo` and `redo` both do
+  `app.plan = current` in their catch blocks, where `current` is the `base`
+  object itself, so later in-place edits mutate the snapshot and the next undo
+  becomes a no-op. `structuredClone`.
+- **Undo is live during a seeding run.** `setRunningUI` disables the controls
+  that would disturb a run and was not told about the two new buttons. The run
+  is safe — the Go side captured the plan before starting — but `renderDiagram`
+  destroys every progress bar mid-stream.
+- **A schema apply leaves the history intact.** Undoing across an applied
+  `DROP TABLE` PUTs a plan naming a table that no longer exists, which
+  `plan.Validate` refuses. Same fix as the first item.
+- **The keystroke comment says the opposite of the code.** It claims the
+  shortcut works while a field has focus; the guard is `!inField`, so it works
+  in no field at all. The behaviour is the intended one — the browser's own
+  undo is what a person typing means — and the comment is simply wrong.
+
+None of these is caught by a test, which is its own finding: both suites are
+strictly awaited, so no test can see the concurrency, and every test supplies
+its own label, so none sees the "undefined".
+
 ## Bugs found and fixed
 
 - A composite primary key emitted an inline `PRIMARY KEY` per column *and* a
@@ -153,8 +204,8 @@ is what the wire protocol expects.
   headlessly and tests the router and the layout relaxation against boxes it
   supplies. `tests/browser/` drives a real Chromium: the layout as the browser
   computes it, edges checked against what was actually rendered, dragging,
-  folding, zoom, and a seeding run driven from the UI. Still uncovered: undo,
-  the schema editor's dialogs, and the context menus.
+  folding, zoom, and a seeding run driven from the UI. Still uncovered: the
+  schema editor's dialogs and the context menus.
 - The index suggestion the README mentions does not exist, and the README says
   so.
 - The integration tests in `tests/` cover whichever engines the environment

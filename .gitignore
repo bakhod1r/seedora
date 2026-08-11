@@ -16,6 +16,19 @@
 *.sqlite
 *.sqlite3
 
+# The browser tests are the one part of this project with a Python toolchain,
+# and it leaves bytecode and a virtualenv behind. Neither belongs here: the
+# cache is rewritten on every run and would churn in every diff, and the
+# interpreter version is baked into its filename.
+__pycache__/
+*.py[cod]
+/.venv/
+
+# The subagent-driven workspace: ledgers, briefs, and review packages, which are
+# scratch for a plan in progress rather than a record of it. Git history is the
+# record.
+/.superpowers/
+
 # oneenv reads these, and they are where a DSN with a password lives.
 .env
 .env.*

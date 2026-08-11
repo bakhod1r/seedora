@@ -129,6 +129,7 @@ export function loadApp() {
     Math,
     Date,
     JSON,
+    structuredClone,
   };
   sandbox.addEventListener = () => {};
   sandbox.removeEventListener = () => {};

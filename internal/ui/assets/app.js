@@ -255,6 +255,13 @@ function applyState(s) {
   app.plan = s.plan;
   app.schema = s.schema;
 
+  // A plan describes one database's tables. Connecting to another makes every
+  // snapshot in the history a description of something that is no longer there.
+  if (s.target !== historyTarget) {
+    historyTarget = s.target;
+    resetHistory();
+  }
+
   $("target").hidden = !s.connected;
   if (s.connected) {
     $("target-engine").textContent = s.engine;
@@ -289,12 +296,152 @@ function renderProblems(problems) {
   for (const p of problems) box.appendChild(el("div", null, p));
 }
 
-async function pushPlan() {
+// pushPlan sends the whole plan and applies the server's reply.
+//
+// A label makes the edit undoable and is what the toast and the button tooltip
+// say. Saving without one — before a run, say — is not an edit and does not
+// belong in the history.
+async function pushPlan(label) {
+  const before = history.base;
   try {
     applyState(await api("PUT", "/api/plan", app.plan));
   } catch (e) {
     toast(e.message, "bad");
+    return;
   }
+  // Recorded only after the server has taken it. An edit it refused never
+  // happened, and offering to undo it would be offering to undo nothing.
+  if (label) recordEdit(label, before);
+  history.base = snapshotPlan();
+  updateHistoryButtons();
+}
+
+// undo puts the plan back the way it was before the last recorded edit.
+//
+// It goes through the server like any other change, because the server holds
+// the plan and a local revert would leave the two disagreeing until the next
+// save. That also means an undo can fail, and a failed undo has to leave the
+// stack exactly as it found it.
+async function undo() {
+  if (!canUndo()) return;
+  const entry = history.past.pop();
+  const current = history.base;
+
+  app.plan = structuredClone(entry.plan);
+  try {
+    applyState(await api("PUT", "/api/plan", app.plan));
+  } catch (e) {
+    history.past.push(entry);
+    app.plan = current;
+    toast(e.message, "bad");
+    return;
+  }
+
+  history.future.push({ label: entry.label, plan: current });
+  history.base = snapshotPlan();
+  renderDiagram();
+  updateHistoryButtons();
+  toast(`Undid ${entry.label}`, "good");
+}
+
+// redo reapplies what undo took away.
+async function redo() {
+  if (!canRedo()) return;
+  const entry = history.future.pop();
+  const current = history.base;
+
+  app.plan = structuredClone(entry.plan);
+  try {
+    applyState(await api("PUT", "/api/plan", app.plan));
+  } catch (e) {
+    history.future.push(entry);
+    app.plan = current;
+    toast(e.message, "bad");
+    return;
+  }
+
+  history.past.push({ label: entry.label, plan: current });
+  history.base = snapshotPlan();
+  renderDiagram();
+  updateHistoryButtons();
+  toast(`Redid ${entry.label}`, "good");
+}
+
+// ---- undo
+//
+// Every plan edit commits through pushPlan, which is what makes undo cheap:
+// there is one place that knows an edit has happened and succeeded, so there is
+// one place to snapshot from. Individual edits do not have to remember to
+// record themselves, and none of them can forget.
+//
+// What is stored is the whole plan rather than a diff. A plan for a large
+// schema is a few hundred kilobytes and an edit touches one column of it, so a
+// diff would be smaller — and it would also be a second representation of the
+// plan to keep correct, for a saving nobody can perceive.
+
+// UNDO_LIMIT bounds what the stack holds. Twenty-five edits is further back
+// than anyone reaches by keystroke, and it stops a long session from keeping
+// every plan it ever had.
+const UNDO_LIMIT = 25;
+
+// historyTarget is the database the stack belongs to, as the redacted DSN the
+// state carries. Comparing it is how a reconnect is noticed.
+let historyTarget = null;
+
+const history = {
+  past: [],   // [{label, plan}] — oldest first
+  future: [], // [{label, plan}] — what undo took away
+  // base is the plan as of the last successful commit. It is what gets pushed
+  // onto past when the *next* edit commits, which is why an edit does not need
+  // to snapshot before mutating.
+  base: null,
+};
+
+function snapshotPlan() {
+  return app.plan ? structuredClone(app.plan) : null;
+}
+
+// resetHistory starts over. Connecting to another database makes every stored
+// plan meaningless — they describe tables this database may not have.
+function resetHistory() {
+  history.past = [];
+  history.future = [];
+  history.base = snapshotPlan();
+}
+
+// recordEdit pushes the plan as it was before the edit that just committed.
+function recordEdit(label, before) {
+  if (!before) return;
+  history.past.push({ label, plan: before });
+  if (history.past.length > UNDO_LIMIT) history.past.shift();
+  // Editing after undoing abandons the branch that was undone. Keeping it would
+  // mean a redo that reapplies a change on top of a plan it was never made
+  // against.
+  history.future = [];
+}
+
+function canUndo() { return history.past.length > 0; }
+function canRedo() { return history.future.length > 0; }
+
+function undoLabel() {
+  return canUndo() ? history.past[history.past.length - 1].label : null;
+}
+
+function redoLabel() {
+  return canRedo() ? history.future[history.future.length - 1].label : null;
+}
+
+// updateHistoryButtons reflects the stack in the toolbar. Defined here because
+// pushPlan calls it; the buttons themselves arrive with the bindings.
+function updateHistoryButtons() {
+  const undoBtn = $("btn-undo");
+  const redoBtn = $("btn-redo");
+  if (!undoBtn || !redoBtn) return;
+
+  undoBtn.disabled = !canUndo();
+  redoBtn.disabled = !canRedo();
+  undoBtn.title = canUndo() ? `Undo ${undoLabel()}` : "Nothing to undo";
+  redoBtn.title = canRedo() ? `Redo ${redoLabel()}` : "Nothing to redo";
 }
 
 // ---------------------------------------------------------------- diagram
@@ -395,7 +542,7 @@ function tableCard(t, tp) {
   rows.setAttribute("aria-label", `Rows to generate for ${t.name}`);
   rows.addEventListener("change", () => {
     tp.rows = Math.max(0, parseInt(rows.value, 10) || 0);
-    pushPlan();
+    pushPlan(`row count for ${t.name}`);
   });
   head.appendChild(rows);
   // Clicking the header lights this table and everything it is joined to. The
@@ -859,7 +1006,7 @@ async function relateColumns(childTable, childColumn, parentTable, parentColumn)
   cp.confidence = "manual";
   cp.why = `drawn in the diagram — points at ${parentTable}.${parentColumn}`;
 
-  await pushPlan();
+  await pushPlan(`${childTable}.${childColumn} → ${parentTable}.${parentColumn}`);
   // Light up what was just joined, because the whole point of drawing it was to
   // see it.
   setFocus(childTable);
@@ -928,7 +1075,7 @@ function moveColumn(t, tp, column, target, above) {
 
   tp.order = order;
   renderDiagram();
-  pushPlan();
+  pushPlan(`column order in ${t.name}`);
 }
 
 function columnRow(t, c, cp) {
@@ -3066,7 +3213,7 @@ const num = (v) => (v === "" ? undefined : isNaN(Number(v)) ? v : Number(v));
 function commit() {
   const cur = current();
   if (cur) cur.cp.confidence = "manual";
-  pushPlan();
+  pushPlan(cur ? `${cur.column} settings` : "column settings");
 }
 
 $("opt-unique").addEventListener("change", (e) => {
@@ -3247,7 +3394,7 @@ async function changeCardinality(key) {
   cp.why = kind === "one"
     ? `one-to-one — each ${singular(parentTable)} is used once`
     : `foreign key to ${parentTable}.${parentColumn}`;
-  await pushPlan();
+  await pushPlan(`${parentTable} → ${childTable} cardinality`);
   renderDiagram();
   toast(`${parentTable} → ${childTable} is now ` +
     (kind === "one" ? "one-to-one" : "one-to-many"), "good");
@@ -4101,6 +4248,8 @@ function clearTableProgress() {
 }
 
 $("btn-seed").addEventListener("click", openSeedDialog);
+$("btn-undo").addEventListener("click", undo);
+$("btn-redo").addEventListener("click", redo);
 
 // ---------------------------------------------------------------- import
 
@@ -4397,6 +4546,22 @@ document.addEventListener("keydown", (e) => {
     if (app.flow) { followEdge(app.flow); return; }
     if (app.focus) { focusTable(app.focus); return; }
     if (!$("inspector").hidden) closeInspector();
+    return;
+  }
+
+  // Undo is the one shortcut that keeps its modifier, because it is the one
+  // people arrive already knowing. It also works while a field has focus,
+  // where a bare letter would be a character someone was typing — but not in a
+  // text field, where the browser's own undo is the one they mean.
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key.toLowerCase() === "z" && !inField) {
+    e.preventDefault();
+    if (e.shiftKey) redo(); else undo();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === "y" && !inField) {
+    e.preventDefault();
+    redo();
     return;
   }
 
