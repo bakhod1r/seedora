@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/bakhod1r/seedora/internal/config"
 	"github.com/bakhod1r/seedora/internal/db"
 	"github.com/bakhod1r/seedora/internal/ddl"
+	"github.com/bakhod1r/seedora/internal/export"
 	"github.com/bakhod1r/seedora/internal/model"
 	"github.com/bakhod1r/seedora/internal/plan"
 	"github.com/bakhod1r/seedora/internal/seed"
@@ -103,7 +105,55 @@ func cmdUI(ctx context.Context, args []string) error {
 
 // cmdRun executes a saved config with no UI. This is the CI path.
 func cmdRun(ctx context.Context, args []string) error {
-	f, err := parseFlags("seedora run", args)
+	return seedFromConfig(ctx, "seedora run", args, nil)
+}
+
+// cmdDump generates the same rows and writes them to files instead of into the
+// database. The schema still comes from a real one, because the schema is what
+// every generator is inferred from: this is "give me this data as files", not
+// "seed without a database".
+func cmdDump(ctx context.Context, args []string) error {
+	return seedFromConfig(ctx, "seedora dump", args, func(f *flags, d db.Driver) (db.Driver, func(), error) {
+		format, err := export.ParseFormat(f.format)
+		if err != nil {
+			return nil, nil, err
+		}
+		dir := f.out
+		if dir == "" {
+			dir = "./seedora-data"
+		}
+		w, err := export.New(d, dir, format)
+		if err != nil {
+			return nil, nil, err
+		}
+		return w, func() {
+			files := w.Files()
+			if len(files) == 0 {
+				return
+			}
+			// Listed in the order they were written, which is parents before
+			// children — the order they have to be loaded back in.
+			fmt.Printf("Wrote %d file(s) to %s, in load order:\n", len(files), dir)
+			for _, path := range files {
+				fmt.Println("  " + filepath.Base(path))
+			}
+		}, nil
+	})
+}
+
+// seedFromConfig is the body both of them share: resolve the config, connect,
+// introspect, apply migrations, load or infer the plan, and run.
+//
+// destination optionally wraps the driver, which is how dump redirects the
+// write without a second copy of any of the above. It returns the driver to
+// use and something to print at the end.
+func seedFromConfig(
+	ctx context.Context,
+	name string,
+	args []string,
+	destination func(*flags, db.Driver) (db.Driver, func(), error),
+) error {
+	f, err := parseFlags(name, args)
 	if err != nil {
 		return err
 	}
@@ -141,7 +191,22 @@ func cmdRun(ctx context.Context, args []string) error {
 			cfg.ConfigPath)
 	}
 
-	fmt.Printf("Seeding %s · %s\n", d.Name(), config.Redacted(dsn))
+	// Wrapped after introspection and after the migrations, both of which are
+	// the real database's job. Only the write is redirected.
+	listFiles := func() {}
+	if destination != nil {
+		wrapped, done, err := destination(f, d)
+		if err != nil {
+			return err
+		}
+		d = wrapped
+		if done != nil {
+			listFiles = done
+		}
+		fmt.Printf("Generating from %s · %s\n", d.Name(), config.Redacted(dsn))
+	} else {
+		fmt.Printf("Seeding %s · %s\n", d.Name(), config.Redacted(dsn))
+	}
 
 	res, err := seed.Run(ctx, d, s, p, seed.Options{
 		Seed:     cfg.Seed,
@@ -157,6 +222,7 @@ func cmdRun(ctx context.Context, args []string) error {
 		return err
 	}
 	report(res)
+	listFiles()
 	return nil
 }
 

@@ -690,6 +690,10 @@ func splitRef(ref string) (table, column string, ok bool) {
 // on MySQL rather than double quotes, because a double-quoted identifier there
 // is a string literal unless the session sets ANSI_QUOTES — which the driver
 // does, but a script exported from here is meant to run anywhere.
+// QuoteIdent exposes it: an exported fixture of INSERT statements has to run on
+// the same unconfigured session an exported schema.sql does.
+func QuoteIdent(d Dialect, s string) string { return quoteAs(d, s) }
+
 func quoteAs(d Dialect, s string) string {
 	if d == MySQL {
 		return "`" + strings.ReplaceAll(s, "`", "``") + "`"

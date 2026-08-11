@@ -52,6 +52,8 @@ func run(ctx context.Context, args []string) error {
 		switch args[0] {
 		case "run":
 			return cmdRun(ctx, args[1:])
+		case "dump":
+			return cmdDump(ctx, args[1:])
 		case "scan":
 			return cmdScan(ctx, args[1:])
 		case "validate":
@@ -77,6 +79,7 @@ func usage(w *os.File) {
 Usage:
   seedora [flags]                    start the mapping UI
   seedora run      [flags]           run a saved config, no UI
+  seedora dump     [flags]           generate the same rows into files, not the database
   seedora scan     [flags]           introspect a schema and write a starter config
   seedora validate [flags]           check a config against the live schema
   seedora version                    print version and build info
@@ -97,6 +100,8 @@ Common flags:
   --locale <name>      generator locale (default en_US)
   --batch <n>          rows generated per unit of work (default 5000)
   --quiet              suppress the progress line
+  -o <path>            where to write: the config (scan) or the directory (dump)
+  --format <name>      dump format: csv, json, or sql (default csv)
   --i-know-what-im-doing
                        bypass the production-target guard
 
@@ -124,6 +129,7 @@ type flags struct {
 	batch    int
 	force    bool
 	out      string
+	format   string
 	quiet    bool
 
 	migrations string
@@ -133,7 +139,8 @@ func parseFlags(name string, args []string) (*flags, error) {
 	f := &flags{fs: flag.NewFlagSet(name, flag.ContinueOnError)}
 	f.fs.StringVar(&f.dsn, "dsn", "", "connection string")
 	f.fs.StringVar(&f.cfgPath, "config", "", "mapping file")
-	f.fs.StringVar(&f.out, "o", "", "write the config here (scan)")
+	f.fs.StringVar(&f.out, "o", "", "output path: the config (scan) or the directory (dump)")
+	f.fs.StringVar(&f.format, "format", "csv", "dump file format: csv, json, or sql")
 	f.fs.IntVar(&f.rows, "rows", 0, "override the row count for every table")
 	f.fs.Uint64Var(&f.seed, "seed", 0, "fix the random seed")
 	f.fs.BoolVar(&f.truncate, "truncate", false, "truncate target tables first")
