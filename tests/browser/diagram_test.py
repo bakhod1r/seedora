@@ -319,3 +319,34 @@ def test_the_page_is_usable_at_a_laptop_width(browser, server):
     assert not overflow, "the page scrolls sideways at 1280px"
     assert errors == [], f"errors at 1280px: {errors}"
     context.close()
+
+
+def test_undo_reverses_an_edit(page):
+    """The gesture end to end: change a row count, take it back.
+
+    tests/ui/ proves the stack; this proves the keystroke reaches it and the
+    page shows the result, which is the half that needs a browser.
+    """
+    rows = page.locator("section.table input[type='number']").first
+    original = rows.input_value()
+
+    rows.fill("4321")
+    rows.dispatch_event("change")
+    page.wait_for_timeout(500)
+
+    undo_button = page.locator("#btn-undo")
+    assert not undo_button.is_disabled(), "the edit did not become undoable"
+
+    undo_button.click()
+    page.wait_for_timeout(600)
+
+    assert rows.input_value() == original, "undo did not restore the row count"
+    assert page.locator("#btn-redo").is_disabled() is False, "the edit is not redoable"
+    assert page.errors == [], f"console errors: {page.errors}"
+
+
+def test_undo_is_disabled_with_nothing_to_undo(page):
+    """A fresh page has no history, and the control says so rather than
+    offering an action that would do nothing."""
+    assert page.locator("#btn-undo").is_disabled()
+    assert page.locator("#btn-redo").is_disabled()
