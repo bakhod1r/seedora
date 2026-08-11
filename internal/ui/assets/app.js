@@ -4248,6 +4248,8 @@ function clearTableProgress() {
 }
 
 $("btn-seed").addEventListener("click", openSeedDialog);
+$("btn-undo").addEventListener("click", undo);
+$("btn-redo").addEventListener("click", redo);
 
 // ---------------------------------------------------------------- import
 
@@ -4544,6 +4546,22 @@ document.addEventListener("keydown", (e) => {
     if (app.flow) { followEdge(app.flow); return; }
     if (app.focus) { focusTable(app.focus); return; }
     if (!$("inspector").hidden) closeInspector();
+    return;
+  }
+
+  // Undo is the one shortcut that keeps its modifier, because it is the one
+  // people arrive already knowing. It also works while a field has focus,
+  // where a bare letter would be a character someone was typing — but not in a
+  // text field, where the browser's own undo is the one they mean.
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key.toLowerCase() === "z" && !inField) {
+    e.preventDefault();
+    if (e.shiftKey) redo(); else undo();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === "y" && !inField) {
+    e.preventDefault();
+    redo();
     return;
   }
 
