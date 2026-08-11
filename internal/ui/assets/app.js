@@ -297,6 +297,66 @@ async function pushPlan() {
   }
 }
 
+// ---- undo
+//
+// Every plan edit commits through pushPlan, which is what makes undo cheap:
+// there is one place that knows an edit has happened and succeeded, so there is
+// one place to snapshot from. Individual edits do not have to remember to
+// record themselves, and none of them can forget.
+//
+// What is stored is the whole plan rather than a diff. A plan for a large
+// schema is a few hundred kilobytes and an edit touches one column of it, so a
+// diff would be smaller — and it would also be a second representation of the
+// plan to keep correct, for a saving nobody can perceive.
+
+// UNDO_LIMIT bounds what the stack holds. Twenty-five edits is further back
+// than anyone reaches by keystroke, and it stops a long session from keeping
+// every plan it ever had.
+const UNDO_LIMIT = 25;
+
+const history = {
+  past: [],   // [{label, plan}] — oldest first
+  future: [], // [{label, plan}] — what undo took away
+  // base is the plan as of the last successful commit. It is what gets pushed
+  // onto past when the *next* edit commits, which is why an edit does not need
+  // to snapshot before mutating.
+  base: null,
+};
+
+function snapshotPlan() {
+  return app.plan ? structuredClone(app.plan) : null;
+}
+
+// resetHistory starts over. Connecting to another database makes every stored
+// plan meaningless — they describe tables this database may not have.
+function resetHistory() {
+  history.past = [];
+  history.future = [];
+  history.base = snapshotPlan();
+}
+
+// recordEdit pushes the plan as it was before the edit that just committed.
+function recordEdit(label, before) {
+  if (!before) return;
+  history.past.push({ label, plan: before });
+  if (history.past.length > UNDO_LIMIT) history.past.shift();
+  // Editing after undoing abandons the branch that was undone. Keeping it would
+  // mean a redo that reapplies a change on top of a plan it was never made
+  // against.
+  history.future = [];
+}
+
+function canUndo() { return history.past.length > 0; }
+function canRedo() { return history.future.length > 0; }
+
+function undoLabel() {
+  return canUndo() ? history.past[history.past.length - 1].label : null;
+}
+
+function redoLabel() {
+  return canRedo() ? history.future[history.future.length - 1].label : null;
+}
+
 // ---------------------------------------------------------------- diagram
 
 function renderDiagram() {
