@@ -9,7 +9,7 @@ LDFLAGS := -s -w \
 	-X main.commit=$(COMMIT) \
 	-X main.date=$(DATE)
 
-.PHONY: help build dev dev-big dev-mysql test test-js test-all race cover vet fmt lint bench pages clean demo demo-big mysql-up mysql-down pg-up pg-down
+.PHONY: help build dev dev-big dev-mysql test test-js test-browser test-all race cover vet fmt lint bench pages clean demo demo-big mysql-up mysql-down pg-up pg-down
 
 help:
 	@echo "build   single binary with the UI embedded"
@@ -20,7 +20,8 @@ help:
 	@echo "mysql-down remove it"
 	@echo "test    unit tests"
 	@echo "test-js the page's router and layout, under node"
-	@echo "test-all both, plus the integration tests against the throwaway servers"
+	@echo "test-browser the page in a real browser (needs Playwright, see tests/browser)"
+	@echo "test-all everything above, plus the integration tests against the throwaway servers"
 	@echo "pg-up   start a throwaway PostgreSQL in Docker, on :15432"
 	@echo "pg-down remove it"
 	@echo "race    unit tests under the race detector"
@@ -52,6 +53,19 @@ test:
 # having a JavaScript toolchain.
 test-js:
 	node --test tests/ui/
+
+# The page in a real Chromium: the layout as the browser computes it, the drag
+# gestures, and a seeding run driven from the UI. This is the only target with
+# a dependency list, and it is deliberately outside the build — see
+# tests/browser/requirements.txt. PYTHON points at the interpreter holding
+# them.
+PYTHON ?= .venv/bin/python
+
+test-browser:
+	@test -x "$(PYTHON)" || { \
+		echo "no interpreter at $(PYTHON) — see tests/browser/requirements.txt,"; \
+		echo "or pass one: make test-browser PYTHON=/path/to/python"; exit 1; }
+	$(PYTHON) -m pytest tests/browser/ -q
 
 # Everything, including the integration tests that skip without a server. Both
 # containers have to be up; `make pg-up mysql-up` first.

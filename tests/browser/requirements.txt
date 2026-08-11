@@ -1,0 +1,9 @@
+# The browser tests are the one part of this project with a dependency list.
+# Nothing here is needed to build, run, or ship Seedora — `go build` produces
+# the same single binary whether or not any of it is installed.
+#
+#   python3 -m venv .venv && .venv/bin/pip install -r tests/browser/requirements.txt
+#   .venv/bin/python -m playwright install chromium
+#   make test-browser
+playwright>=1.40
+pytest>=7.4

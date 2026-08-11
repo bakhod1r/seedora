@@ -149,18 +149,42 @@ is what the wire protocol expects.
 
 ## Known gaps
 
-- **The page's rendering is still uncovered.** The geometry is not: `tests/ui/`
-  loads `app.js` headlessly and tests the router and the layout relaxation,
-  including the 5×5 grid check that used to be a throwaway script. What remains
-  unverified is everything needing a real box model — the drag gestures, the
-  undo-less state, the rendering itself. That needs a browser, which is a
-  different tool.
+- **The page is covered at two levels now.** `tests/ui/` loads `app.js`
+  headlessly and tests the router and the layout relaxation against boxes it
+  supplies. `tests/browser/` drives a real Chromium: the layout as the browser
+  computes it, edges checked against what was actually rendered, dragging,
+  folding, zoom, and a seeding run driven from the UI. Still uncovered: undo,
+  the schema editor's dialogs, and the context menus.
 - The index suggestion the README mentions does not exist, and the README says
   so.
 - The integration tests in `tests/` cover whichever engines the environment
   names. `make pg-up` and `make mysql-up` start both, `make test-all` runs
   everything against them. A DSN that is set but does not work is now a failure
   rather than a skip — see below.
+
+## Two bugs the browser tests found
+
+Both were reproducible from the command line once seen, and both broke
+`seedora run` against this repository's own large demo schema — 23 tables,
+which is the first schema either shape appears in.
+
+- **A self-reference poisoned the foreign-key pool.** `categories.parent_id`
+  points at `categories.id`, and it is resolved before a single row of
+  `categories` has been written, so the read is legitimately empty. That empty
+  pool was then cached under `categories.id`, and every later child of
+  `categories` got a cache hit on it — a NULL in `products.category_id`, which
+  is NOT NULL, so the run died two tables later naming a column whose plan was
+  correct. An empty pool is no longer cached: emptiness is the one thing about
+  a parent that changes during a run.
+
+- **A primary key that is also a foreign key was not seen as a one-to-one.**
+  `keyColumns` asked `cp.Unique || c.Unique`, and `Column.Unique` is read from
+  the unique indexes — a single-column primary key does not always have one,
+  and on SQLite an `INTEGER PRIMARY KEY` is the rowid, so `pragma_index_list`
+  reports nothing. The one-to-one assigner declined the table, the ordinary
+  uniqueness repair replaced the duplicate with the row index, and that is a
+  foreign key pointing at nothing. Being the sole primary key now counts as
+  unique, asked directly rather than through the index list.
 
 ## The Postgres tests had never run
 

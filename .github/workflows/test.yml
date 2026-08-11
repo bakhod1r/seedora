@@ -82,3 +82,30 @@ jobs:
         run: |
           go test -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -1
+
+  # The page in a real Chromium. A separate job because it installs a browser
+  # and a Python environment, neither of which the Go tests should wait on, and
+  # neither of which is needed to build or ship Seedora.
+  browser:
+    name: the page in a browser
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright
+        run: |
+          pip install -r tests/browser/requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Test
+        run: python -m pytest tests/browser/ -q
