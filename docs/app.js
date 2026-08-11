@@ -2249,6 +2249,15 @@ function routeAround(x1, y1, x2, y2, boxes, from, to, key, out1 = 1, out2 = -1) 
   const held = app.waypoints[key];
   if (held) return throughWaypoint(x1, y1, x2, y2, held.x, held.y);
 
+  return roundedPath(routePoints(x1, y1, x2, y2, boxes, from, to, out1, out2), 12);
+}
+
+// routePoints is routeAround's decision, before it becomes a path string.
+//
+// It is separate so a test can ask the question the router exists to answer —
+// does this route cross a card — which cannot be read back out of the rounded
+// path, since the corners no longer lie on the corners.
+function routePoints(x1, y1, x2, y2, boxes, from, to, out1 = 1, out2 = -1) {
   const stub = 24;
   const ax = x1 + out1 * stub;   // out of the side the child was left by
   const bx = x2 + out2 * stub;   // into the side the parent is entered on
@@ -2305,11 +2314,11 @@ function routeAround(x1, y1, x2, y2, boxes, from, to, key, out1 = 1, out2 = -1) 
   }
 
   for (const points of options) {
-    if (isClear(points, boxes, from, to)) return roundedPath(points, 12);
+    if (isClear(points, boxes, from, to)) return points;
   }
   // Everything was blocked, which means the cards are stacked on top of each
   // other. The last route is no worse than the rest.
-  return roundedPath(options[options.length - 1] || [start, finish], 12);
+  return options[options.length - 1] || [start, finish];
 }
 
 // throughWaypoint is the detour itself: out of each card, across at the
