@@ -16,6 +16,11 @@ import (
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
+	// The assertions read the database back through database/sql, which needs
+	// its own driver registered — Seedora's Postgres driver talks pgx directly
+	// and registers nothing. Without this, sql.Open("pgx", …) fails and the
+	// Postgres tests skip on a machine that was told to run them.
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
 	"github.com/bakhod1r/seedora/internal/db"
@@ -131,12 +136,15 @@ func openSQLite(t *testing.T) target {
 func openPostgres(t *testing.T, dsn string) target {
 	t.Helper()
 
+	// Fatal, not Skip. SEEDORA_TEST_POSTGRES is set by somebody who wants these
+	// tests run, and a skip on a broken connection is how they came to be
+	// green in CI for months without ever running.
 	raw, err := sql.Open("pgx", dsn)
 	if err != nil {
-		t.Skipf("postgres: %v", err)
+		t.Fatalf("postgres: %v", err)
 	}
 	if err := raw.Ping(); err != nil {
-		t.Skipf("postgres is not reachable: %v", err)
+		t.Fatalf("postgres is not reachable at the DSN in SEEDORA_TEST_POSTGRES: %v", err)
 	}
 	if _, err := raw.Exec(postgresSchema); err != nil {
 		t.Fatal(err)
@@ -155,12 +163,15 @@ func openMySQL(t *testing.T, dsn string) target {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Fatal, not Skip, for the same reason as Postgres: SEEDORA_TEST_MYSQL is
+	// set by somebody who wants these tests run, and skipping when the DSN does
+	// not work is how a suite stays green without ever having executed.
 	raw, err := sql.Open("mysql", native+"&multiStatements=true")
 	if err != nil {
-		t.Skipf("mysql: %v", err)
+		t.Fatalf("mysql: %v", err)
 	}
 	if err := raw.Ping(); err != nil {
-		t.Skipf("mysql is not reachable: %v", err)
+		t.Fatalf("mysql is not reachable at the DSN in SEEDORA_TEST_MYSQL: %v", err)
 	}
 	// The database named by SEEDORA_TEST_MYSQL is one the tests may destroy, and
 	// emptying it first is what makes the suite immune to whatever a previous

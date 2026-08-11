@@ -54,6 +54,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Pinned rather than taken from the image, so the page's tests run on a
+      # known runtime — they use node's built-in test runner, which is only
+      # stable from 20 on.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Build
         run: go build ./...
 
@@ -64,6 +71,12 @@ jobs:
         env:
           SEEDORA_TEST_POSTGRES: postgres://seedora:seedora@localhost:5432/seedora_test?sslmode=disable
           SEEDORA_TEST_MYSQL: mysql://root:seedora@127.0.0.1:3306/seedora_test
+
+      # The diagram's router and layout are plain functions and are tested with
+      # node's own runner. No install step and no package.json: the UI has no
+      # build toolchain and this does not give it one.
+      - name: Test the page's geometry
+        run: node --test tests/ui/
 
       - name: Coverage
         run: |

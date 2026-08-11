@@ -9,7 +9,7 @@ LDFLAGS := -s -w \
 	-X main.commit=$(COMMIT) \
 	-X main.date=$(DATE)
 
-.PHONY: help build dev dev-big dev-mysql test race cover vet fmt lint bench pages clean demo demo-big mysql-up mysql-down
+.PHONY: help build dev dev-big dev-mysql test test-js test-all race cover vet fmt lint bench pages clean demo demo-big mysql-up mysql-down pg-up pg-down
 
 help:
 	@echo "build   single binary with the UI embedded"
@@ -19,6 +19,10 @@ help:
 	@echo "dev-mysql run against that MySQL, seeding the example schema's migrations"
 	@echo "mysql-down remove it"
 	@echo "test    unit tests"
+	@echo "test-js the page's router and layout, under node"
+	@echo "test-all both, plus the integration tests against the throwaway servers"
+	@echo "pg-up   start a throwaway PostgreSQL in Docker, on :15432"
+	@echo "pg-down remove it"
 	@echo "race    unit tests under the race detector"
 	@echo "cover   tests with a coverage report"
 	@echo "bench   generation and insert throughput"
@@ -41,6 +45,34 @@ dev-big: demo-big
 
 test:
 	go test ./...
+
+# The diagram is the largest part of the codebase and its geometry is plain
+# functions, so it is tested the same way everything else is. node's own test
+# runner, no dependencies, no package.json: the point of this project is not
+# having a JavaScript toolchain.
+test-js:
+	node --test tests/ui/
+
+# Everything, including the integration tests that skip without a server. Both
+# containers have to be up; `make pg-up mysql-up` first.
+test-all: test-js
+	SEEDORA_TEST_POSTGRES=postgres://seedora:seedora@127.0.0.1:15432/seedora_test?sslmode=disable \
+	SEEDORA_TEST_MYSQL=mysql://root:seedora@127.0.0.1:13306/seedora_dev \
+	go test ./...
+
+# The Postgres counterpart to mysql-up. The integration tests in tests/ skip
+# without SEEDORA_TEST_POSTGRES, which on a laptop means they are usually not
+# run at all; this is the one line that fixes that.
+pg-up:
+	docker run -d --name seedora-postgres \
+		-e POSTGRES_PASSWORD=seedora -e POSTGRES_USER=seedora -e POSTGRES_DB=seedora_test \
+		-p 15432:5432 postgres:16-alpine
+	@echo "waiting for PostgreSQL…"
+	@until docker exec seedora-postgres pg_isready -U seedora -q 2>/dev/null; do sleep 1; done
+	@echo "postgres://seedora:seedora@127.0.0.1:15432/seedora_test?sslmode=disable"
+
+pg-down:
+	docker rm -f seedora-postgres
 
 # A throwaway MySQL to develop and test the driver against. The port is not
 # 3306, so it cannot collide with one already running on the machine.
@@ -88,7 +120,7 @@ vet:
 fmt:
 	gofmt -l -w .
 
-lint: fmt vet race
+lint: fmt vet race test-js
 
 clean:
 	go clean
