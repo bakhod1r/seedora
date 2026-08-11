@@ -149,6 +149,7 @@ func cmdRun(ctx context.Context, args []string) error {
 		Rows:     cfg.Rows,
 		Batch:    cfg.Batch,
 		Truncate: cfg.Truncate,
+		Append:   cfg.Append,
 		DryRun:   cfg.DryRun,
 		Progress: progressPrinter(f.quiet),
 	})

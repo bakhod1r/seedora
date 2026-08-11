@@ -87,10 +87,16 @@ Common flags:
   --rows <n>           override the row count for every table
   --seed <n>           fix the random seed for reproducible output
   --truncate           truncate target tables before seeding
+  --append             add rows to tables that already have some; nothing is
+                       emptied, and unique columns are read back first
   --dry-run            generate and validate without writing
   --migrations <path>  migration directory or .sql file; tables in it that the
                        database lacks are created first
   --port <n>           UI port (default 7777)
+  --host <addr>        UI bind address (default 127.0.0.1)
+  --locale <name>      generator locale (default en_US)
+  --batch <n>          rows generated per unit of work (default 5000)
+  --quiet              suppress the progress line
   --i-know-what-im-doing
                        bypass the production-target guard
 
@@ -110,6 +116,7 @@ type flags struct {
 	rows     int
 	seed     uint64
 	truncate bool
+	appendTo bool
 	dryRun   bool
 	port     int
 	host     string
@@ -130,6 +137,7 @@ func parseFlags(name string, args []string) (*flags, error) {
 	f.fs.IntVar(&f.rows, "rows", 0, "override the row count for every table")
 	f.fs.Uint64Var(&f.seed, "seed", 0, "fix the random seed")
 	f.fs.BoolVar(&f.truncate, "truncate", false, "truncate target tables first")
+	f.fs.BoolVar(&f.appendTo, "append", false, "add rows to tables that already have some")
 	f.fs.BoolVar(&f.dryRun, "dry-run", false, "generate and validate without writing")
 	f.fs.IntVar(&f.port, "port", 0, "UI port")
 	f.fs.StringVar(&f.host, "host", "", "UI bind address")
@@ -178,6 +186,9 @@ func (f *flags) load() (*config.Config, error) {
 	}
 	if f.truncate {
 		cfg.Truncate = true
+	}
+	if f.appendTo {
+		cfg.Append = true
 	}
 	if f.dryRun {
 		cfg.DryRun = true

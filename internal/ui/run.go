@@ -117,6 +117,7 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DryRun   bool   `json:"dry_run"`
 		Truncate bool   `json:"truncate"`
+		Append   bool   `json:"append"`
 		Rows     int    `json:"rows"`
 		Seed     uint64 `json:"seed"`
 	}
@@ -146,6 +147,7 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 		Rows:     req.Rows,
 		Batch:    s.cfg.Batch,
 		Truncate: req.Truncate,
+		Append:   req.Append,
 		DryRun:   req.DryRun,
 	}
 	s.mu.Unlock()

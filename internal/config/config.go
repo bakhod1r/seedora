@@ -41,7 +41,10 @@ type Config struct {
 	Batch int    `env:"SEEDORA_BATCH" default:"5000" desc:"rows per bulk write"`
 
 	Truncate bool `env:"SEEDORA_TRUNCATE" desc:"truncate target tables before seeding"`
-	DryRun   bool `env:"SEEDORA_DRY_RUN" desc:"generate and validate without writing"`
+	// Append adds to tables that already hold rows rather than assuming they
+	// are empty. It is the opposite of Truncate and refuses to run with it.
+	Append bool `env:"SEEDORA_APPEND" desc:"add rows to tables that already have some"`
+	DryRun bool `env:"SEEDORA_DRY_RUN" desc:"generate and validate without writing"`
 
 	// AllowProduction disables the production-target guard. It exists so the
 	// guard can be overridden deliberately and never silently.

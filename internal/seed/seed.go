@@ -40,6 +40,11 @@ type Options struct {
 	Batch int
 	// Truncate empties every target table first, whatever the plan says.
 	Truncate bool
+	// Append adds rows to tables that already hold some, instead of assuming
+	// the table is empty. No table is emptied — not even one the plan asks to
+	// truncate — and every unique column is read back first so the rows this
+	// run generates are unique against the ones already there.
+	Append bool
 	// DryRun generates and validates everything but writes nothing.
 	DryRun bool
 	// Progress is called as rows go past. It may be nil, and it is called from
@@ -84,6 +89,13 @@ func Run(ctx context.Context, d db.Driver, s *model.Schema, p *plan.Plan, opts O
 	if errs := p.Validate(s); len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
+	// The two flags mean opposite things about the rows already in the table,
+	// and there is no reading of "empty it and then add to what is in it" that
+	// is worth guessing at.
+	if opts.Append && opts.Truncate {
+		return nil, errors.New("--append and --truncate contradict each other: " +
+			"one keeps the rows already in the table, the other deletes them")
+	}
 	order, err := Order(s, p)
 	if err != nil {
 		return nil, err
@@ -111,7 +123,10 @@ func Run(ctx context.Context, d db.Driver, s *model.Schema, p *plan.Plan, opts O
 	// Truncation runs for every table before any table is written, in reverse
 	// dependency order. Doing it as we go would delete a parent's rows after
 	// its children already pointed at them.
-	if !opts.DryRun {
+	// --append overrides the plan as well as the flag. A per-table Truncate in
+	// seedora.yaml is a statement about a run that starts from empty, and this
+	// one does not.
+	if !opts.DryRun && !opts.Append {
 		for i := len(order) - 1; i >= 0; i-- {
 			t := order[i]
 			if !opts.Truncate && !p.Tables[t.Name].Truncate {
@@ -199,6 +214,18 @@ func seedTable(
 		return 0, err
 	}
 	if comp != nil {
+		// A join table's uniqueness is over the pair, and the pairs already in
+		// the table cannot be read back one column at a time — which is the
+		// only shape of read the driver interface has. Appending would generate
+		// pairs from the same parent pools as the previous run and collide with
+		// it, so this is refused where it can be explained rather than left to
+		// surface as a constraint violation with a run half written.
+		if opts.Append && !opts.DryRun {
+			return 0, errors.New("--append is not supported on a join table: its " +
+				"uniqueness is over the pair of foreign keys, and the pairs already " +
+				"present cannot be read back to generate around them. Seed it in one " +
+				"run, or exclude it with rows: 0")
+		}
 		src = &compositeSource{src: src, set: comp}
 	}
 
@@ -207,6 +234,14 @@ func seedTable(
 	// the generating side would serialise the pool it exists to parallelise.
 	// On this side it is already sequential and costs a map lookup per value.
 	if u := newUniqueSet(t, tp, rows); u.active() {
+		// Appending has to be unique against the table, not only against the
+		// run, so the column is read back before the first row is generated.
+		// A dry run has nothing to be unique against and nothing to write.
+		if opts.Append && !opts.DryRun {
+			if err := u.preload(ctx, tx, t); err != nil {
+				return 0, err
+			}
+		}
 		src = &uniqueSource{src: src, set: u}
 	}
 
