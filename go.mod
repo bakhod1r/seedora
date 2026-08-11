@@ -3,8 +3,8 @@ module github.com/bakhod1r/seedora
 go 1.26.2
 
 require (
-	github.com/bakhod1r/oneenv v1.1.0
-	github.com/bakhod1r/synth v1.4.6
+	github.com/bakhod1r/oneenv v1.10.2
+	github.com/bakhod1r/synth v1.6.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
 	gopkg.in/yaml.v3 v3.0.1

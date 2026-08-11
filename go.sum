@@ -1,9 +1,9 @@
 filippo.io/edwards25519 v1.2.0 h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=
 filippo.io/edwards25519 v1.2.0/go.mod h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc=
-github.com/bakhod1r/oneenv v1.1.0 h1:FVhlmEfnW70jKwIhvDdJVYkomwwkkrFgZpvhGhAG3ac=
-github.com/bakhod1r/oneenv v1.1.0/go.mod h1:Aq5r9/qRrRjmpS6ZM/iy4NluN4feID+XuEgMulxNi8o=
-github.com/bakhod1r/synth v1.4.6 h1:O3/aqx0U3M6yMVOrDqNM8Ew2BhnGS+4PMZDJSYPu5RE=
-github.com/bakhod1r/synth v1.4.6/go.mod h1:p7MG7hZMOuvymetXoi8x0KoHF+PBxCDNUDzzcZ+Z0Tk=
+github.com/bakhod1r/oneenv v1.10.2 h1:8iMsj1ggMt5dqQDppq7C2PWMrhuNncUuwI/fe8EHZto=
+github.com/bakhod1r/oneenv v1.10.2/go.mod h1:Aq5r9/qRrRjmpS6ZM/iy4NluN4feID+XuEgMulxNi8o=
+github.com/bakhod1r/synth v1.6.0 h1:zJw+GIXAoTzYHDpeA+A1uvYvuhBdIKqzbzlZF2LEMdM=
+github.com/bakhod1r/synth v1.6.0/go.mod h1:p7MG7hZMOuvymetXoi8x0KoHF+PBxCDNUDzzcZ+Z0Tk=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
