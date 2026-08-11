@@ -24,6 +24,13 @@ import (
 // fake that agrees with the code proves none of that.
 func newServer(t *testing.T, ddls ...string) http.Handler {
 	t.Helper()
+	return newServerBoundTo(t, "127.0.0.1", ddls...)
+}
+
+// newServerBoundTo is newServer with the bind address spelled out, for the
+// tests that care what the origin guard does with it.
+func newServerBoundTo(t *testing.T, host string, ddls ...string) http.Handler {
+	t.Helper()
 
 	dir := t.TempDir()
 	// The per-machine store — remembered connections and the log of applied
@@ -62,6 +69,8 @@ func newServer(t *testing.T, ddls ...string) http.Handler {
 	cfg := &config.Config{
 		ConfigPath: filepath.Join(dir, "seedora.yaml"),
 		Locale:     "en_US",
+		Host:       host,
+		Port:       7777,
 	}
 	p, loaded, err := spec.LoadOrInfer(cfg.ConfigPath, sc)
 	if err != nil {
@@ -80,6 +89,12 @@ func do(t *testing.T, h http.Handler, method, path string, body any) (int, map[s
 	}
 	req := httptest.NewRequest(method, path, &buf)
 	req.Header.Set("Content-Type", "application/json")
+	// What the page itself sends. httptest's default Host is example.com,
+	// which the origin guard refuses — correctly, since a request addressed to
+	// a name that is not loopback is the shape a DNS-rebinding attack has.
+	req.Host = "127.0.0.1:7777"
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Origin", "http://127.0.0.1:7777")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -405,7 +420,11 @@ func TestPreviewRegeneratesWithANonce(t *testing.T) {
 // which every route that needs a database has to survive.
 func disconnected(t *testing.T) http.Handler {
 	t.Helper()
-	cfg := &config.Config{ConfigPath: filepath.Join(t.TempDir(), "seedora.yaml")}
+	cfg := &config.Config{
+		ConfigPath: filepath.Join(t.TempDir(), "seedora.yaml"),
+		Host:       "127.0.0.1",
+		Port:       7777,
+	}
 	return ui.New(cfg, nil, "", nil, (*plan.Plan)(nil), false).Handler()
 }
 

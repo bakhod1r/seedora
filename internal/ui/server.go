@@ -89,7 +89,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/export", s.handleExport)
 	mux.HandleFunc("POST /api/import", s.handleImport)
 
-	return mux
+	// Everything, not only the mutating routes. GET /api/state carries the
+	// schema and GET /api/connections carries the DSNs of every database this
+	// machine has connected to, so a read is worth as much to another site as
+	// a write.
+	return guard(s.cfg.Host, mux)
 }
 
 // noCache makes the browser revalidate the page assets on every load. They are
