@@ -17,8 +17,9 @@ at 1k — the rate climbs because a run's fixed cost is paid once. Postgres `COP
 same rows twice, and a different one does not.
 
 `benchmarks/README.md` carries those numbers and what to read out of them. The
-README still claims ~2.0M rows/s for generation, which the benchmark does not
-reproduce — worth correcting or explaining.
+top-level README claimed ~2.0M rows/s, which the benchmark does not reproduce;
+it now carries the measured figures, names the machine, and says how to rerun
+them.
 
 ## The schema builder
 
@@ -74,14 +75,18 @@ wrong costs data; it is out on purpose, not forgotten.
 
 ## The diagram
 
-Most of the recent work is here, and none of it is covered by tests — see the
-gaps below.
+Most of the recent work is here. The geometry is covered by `tests/ui/`; the
+rendering is not — see the gaps below.
 
 - **Routing.** Edges are orthogonal with rounded corners; no diagonals. Routes
   are proposed and then *tested* against the card boxes — straight, then down
   the middle, then down each corridor between the cards nearest the middle
-  first, then over or under everything. The last always exists. A check on a
-  dense 5×5 grid of cards found a clear route for all 600 pairs.
+  first, then over or under everything. The last always exists. All 600 pairs on
+  a dense 5×5 grid get a clear route, and `tests/ui/router.test.mjs` is what
+  says so on every run. `routePoints` is the decision and `routeAround` wraps it
+  in a rounded path, split apart so the test can ask whether a route crosses a
+  card — the rounded corners no longer sit on the corners, so the path string
+  cannot be checked.
 - Every edge leaves the child's right edge and enters the parent's left, the way
   an ER diagram is drawn. It costs length when the parent sits to the left and
   buys arrows that all mean the same thing.
@@ -144,17 +149,62 @@ is what the wire protocol expects.
 
 ## Known gaps
 
-- **Nothing covers the page itself.** The diagram is the largest and least
-  tested part of the codebase: routing, layout relaxation, the drag gestures,
-  and the undo-less state in `app.js` are all verified by looking at them. The
-  router and the layout were each checked with a throwaway Node script, which is
-  better than nothing and is not a test in the repository.
-- `--append`, and the index suggestion the README mentions, do not exist.
-- The MySQL integration tests skip unless `SEEDORA_TEST_MYSQL` is set; CI sets
-  it, and `make mysql-up` is the one-line way to set it locally.
-- The Postgres integration tests in `tests/` skip unless
-  `SEEDORA_TEST_POSTGRES` is set. CI sets it; a laptop usually does not, so they
-  are effectively unexercised locally.
+- **The page's rendering is still uncovered.** The geometry is not: `tests/ui/`
+  loads `app.js` headlessly and tests the router and the layout relaxation,
+  including the 5×5 grid check that used to be a throwaway script. What remains
+  unverified is everything needing a real box model — the drag gestures, the
+  undo-less state, the rendering itself. That needs a browser, which is a
+  different tool.
+- The index suggestion the README mentions does not exist, and the README says
+  so.
+- The integration tests in `tests/` cover whichever engines the environment
+  names. `make pg-up` and `make mysql-up` start both, `make test-all` runs
+  everything against them. A DSN that is set but does not work is now a failure
+  rather than a skip — see below.
+
+## The Postgres tests had never run
+
+`tests/seed_test.go` reads the database back through `database/sql` and opened
+it with `sql.Open("pgx", …)`, but nothing imported `pgx/v5/stdlib`, so no driver
+by that name was registered. The error was handled with `t.Skipf`, which meant
+the suite reported success without executing: CI set `SEEDORA_TEST_POSTGRES`,
+every Postgres subtest skipped, and the run was green.
+
+Both halves are fixed. The stdlib driver is imported — it is part of `pgx/v5`,
+so no new dependency — and a target named by an environment variable that cannot
+be reached is now `t.Fatalf`. Setting the variable is a request to run those
+tests, and a skip is the wrong answer to a request.
+
+## The UI answers only to its own page
+
+`internal/ui/origin.go` wraps every route. Two checks, because there are two
+questions: `Sec-Fetch-Site` and `Origin` say whether the request came from the
+Seedora page, and the `Host` header says whether it was addressed to Seedora
+rather than to a name an attacker resolved to `127.0.0.1`. Only the second
+catches DNS rebinding, and only the first catches an ordinary cross-site POST.
+
+Reads are covered as well as writes: `/api/state` is the schema and
+`/api/connections` is every DSN this machine has connected to. Requests with
+neither header are allowed — curl, CI, the tests — because no page can produce
+one. Binding past loopback with `--host` relaxes the `Host` check alone.
+
+## --append
+
+Adds rows to tables that already hold some. Nothing is truncated, including
+tables the plan asks to truncate, since that setting describes a run starting
+from empty. Every unique column is read back before generation so the new rows
+are unique against the old, and an integer collision counts on from the largest
+existing value rather than from the row index, which restarts at zero each run.
+
+`key()` now widens every integer to `int64`. This is what makes the preload work
+across drivers: SQLite returns `int64`, pgx returns `int32` for an `integer`
+column, and as map keys those are different values — the set would not have
+recognised the id it was about to duplicate. Covered against all three engines
+in `tests/append_test.go`.
+
+Refused: `--append` with `--truncate`, and `--append` on a join table, whose
+uniqueness is over the pair of foreign keys and whose existing pairs cannot be
+read back one column at a time.
 
 ## Asked for and deliberately not built
 

@@ -187,6 +187,7 @@ Re-scanning a database that already has a config preserves your overrides and pr
 | `seedora run --config <file>` | Run a saved config headlessly, no UI |
 | `seedora scan --dsn <dsn> -o <file>` | Introspect a schema and write a starter config |
 | `seedora validate --config <file>` | Check a config against the live schema |
+| `seedora dump` | Generate the same rows into files instead of the database |
 | `seedora version` | Print version and build info |
 
 Common flags:
@@ -197,15 +198,47 @@ Common flags:
 | `--rows <n>` | Override the row count for every table |
 | `--seed <n>` | Fix the random seed for reproducible output |
 | `--truncate` | Truncate target tables before seeding |
+| `--append` | Add rows to tables that already have some; nothing is emptied |
 | `--dry-run` | Generate and validate without writing |
 | `--migrations <path>` | Migration directory or `.sql` file; tables in it the database lacks are created first |
 | `--port <n>` | UI port (default `7777`) |
+| `--host <addr>` | UI bind address (default `127.0.0.1`) |
+| `-o <path>` | Where to write: the config (`scan`) or the directory (`dump`) |
+| `--format <name>` | `dump` file format: `csv`, `json`, or `sql` (default `csv`) |
 | `--batch <n>` | Rows generated per unit of work (default `5000`) |
 | `--locale <name>` | Generator locale (default `en_US`) |
 | `--quiet` | Suppress the progress line |
 | `--i-know-what-im-doing` | Bypass the production-target guard |
 
 Every flag has an environment variable — `SEEDORA_DSN`, `SEEDORA_ROWS`, `SEEDORA_SEED`, and so on. `seedora --help` prints the full list.
+
+### Writing files instead of rows
+
+`seedora dump` runs the same generation and writes the result to files:
+
+```bash
+seedora dump --format csv -o ./fixtures --rows 500
+```
+
+One file per table, named after it, in `csv`, `json`, or `sql`. It is the same run — the same plan, the same insertion order, the same foreign keys and uniqueness — with only the destination changed, so a fixture is by construction the data seeding would have produced. The same `--seed` produces byte-identical files, which is what makes one worth committing.
+
+The schema still comes from a real database, because the schema is what every generator is inferred from. Nothing is written to it: the run reads the catalog, generates, and rolls back.
+
+Three things the files get right that a naive dump would not. Foreign keys point at rows in the fixture rather than at rows in your development database, so a child loaded next to its parent resolves. A primary key the database would have assigned is assigned by the export instead, counting from one, because a file has no sequence to fall back on. And a `DECIMAL(10,2)` is written with two decimal places rather than a binary float's worth, so the file holds what the column would have held.
+
+The files are listed in the order they were written, which is parents before children — the order they have to be loaded back in.
+
+### Appending to a table that already has rows
+
+By default a run assumes the tables are empty, and a second run into the same table fails on the first unique column it collides with. `--append` is the flag for topping a database up instead:
+
+```bash
+seedora run --append --rows 5000
+```
+
+Nothing is emptied — not even a table `seedora.yaml` asks to truncate, because that setting describes a run that starts from empty. Every unique column is read back before the first row is generated, so the new rows are unique against the ones already there, and an integer collision is repaired by counting on past the largest value the column holds rather than from the row index. Foreign keys already draw from the parent rows present at the time of the run, so appended children point at parents from either run.
+
+Two limits, both deliberate. `--append` and `--truncate` are refused together: they say opposite things about the rows already in the table. And a join table — one whose primary key is a pair of foreign keys — is refused, because its uniqueness is over the pair and the pairs already stored cannot be read back a column at a time; seed it in one run, or set `rows: 0` for it.
 
 In the UI, **Import YAML** loads a `seedora.yaml` into the running session and **Export** downloads the current mapping. An import is merged against the schema you are connected to: choices for columns that still exist are kept, new columns get a proposal, and columns the database no longer has are dropped. A config that does not fit is reported in full and not applied.
 
@@ -215,15 +248,21 @@ The design rule is that the database should never wait on Seedora.
 
 Generation runs on a worker pool sized to the machine, ahead of the writer, feeding rows into a single bulk write per table — one `COPY` for the whole table on Postgres, however many rows it holds. The server parses one statement and then only takes bytes off the wire. Finished batches are re-ordered by index before they are written, so the parallelism costs nothing in reproducibility: the same `--seed` produces byte-identical data whatever the workers happened to do.
 
-Measured on an M-series laptop, two tables, nine and five columns, one foreign key, one unique email column:
+Measured on an Apple M4 Pro, Go 1.26, two tables, ten and five columns, one foreign key, one unique email column. Reproduce with `go test ./benchmarks/ -bench . -benchtime 3s`:
 
 | | rows/second |
 | --- | --- |
-| Generation alone (`--dry-run`) | ~2,000,000 |
+| Generation alone, 100k rows | ~1,150,000 |
+| Generation alone, 10k rows | ~430,000 |
+| Generation alone, 1k rows | ~220,000 |
 | PostgreSQL 16 via `COPY`, over Docker's network stack | ~244,000 |
 | SQLite, pure-Go driver | ~24,000 |
 
-Generation is roughly an order of magnitude faster than the fastest database can accept rows, which is the intended shape: the bottleneck should be the engine, not us.
+Two things to read out of that, both covered at more length in [`benchmarks/README.md`](benchmarks/README.md).
+
+The rate climbs with the row count because a run's fixed cost — compiling the spec, opening the transaction, reading parent keys — is paid once. Below a few thousand rows it is most of the wall clock, and no amount of generator tuning shows up.
+
+At scale, generation is roughly four times faster than `COPY` and fifty times faster than SQLite, which is the intended shape: the bottleneck should be the engine, not us. A slower machine moves every row in the table down together and leaves the ratios where they are.
 
 Clicking a relationship's cardinality marker asks what it should be — one-to-many or one-to-one — and changes it. One-to-one is a mapping change first: the seeder gives each parent exactly one child, and a run asking for more children than there are parents is refused with the arithmetic. It then offers the unique index that makes the database enforce it.
 
@@ -268,6 +307,15 @@ Local targets are never guarded. That is deliberate: a guard that fires on `loca
 The guard is a speed bump, not a permission system. It is a heuristic over a connection string, and it cannot know what your database is for.
 
 Truncation is opt-in, and the UI shows the row count that will be destroyed before it runs. Credentials stay in the DSN, the environment, or the per-machine connection store, and are never written to `seedora.yaml`.
+
+### The UI is only answerable from its own page
+
+The UI holds a live database connection and has no password, because the only client is meant to be the tab Seedora just opened. Binding to loopback does not achieve that on its own: any page open in the same browser can send requests to `http://127.0.0.1:7777`, and a domain an attacker points at `127.0.0.1` is treated by the browser as that domain's own origin. So two separate checks run on every request, reads included — `/api/state` carries your schema and `/api/connections` carries the databases this machine has connected to.
+
+- **Is it from the Seedora page?** `Sec-Fetch-Site` must be `same-origin` or `none`, and an `Origin`, when the browser sends one, must match. A page on another site — including another port on `localhost`, which is another origin — is refused with `403`.
+- **Is it addressed to Seedora?** While bound to loopback, the `Host` header must be `localhost`, `127.0.0.1`, or `[::1]`. This is what a rebound DNS name cannot fake, and it is the only header that catches it. `localhost` is matched as a name rather than resolved, because a resolver is exactly what such an attack controls.
+
+Requests carrying neither `Sec-Fetch-Site` nor `Origin` are allowed: that is `curl`, a script, and the tests, and no web page can produce one. Binding somewhere other than loopback with `--host` relaxes the `Host` check only — publishing the port is a deliberate act, and the name it is then reached by is yours. The cross-site check still applies.
 
 ## Contributing
 
