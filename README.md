@@ -296,6 +296,8 @@ Schema inference will differ by family. Relational and analytical engines are in
 
 Adding an engine means implementing `db.Driver` and `db.Tx` in a package under `internal/db` and importing it from `cmd/seedora`. Nothing above the driver layer branches on which database it is pointed at.
 
+[`docs/engines.md`](docs/engines.md) plans the rest of the list: which drivers are pure Go and what each costs the binary — both measured rather than assumed — and the two decisions that have to be made before the heavy ones land.
+
 ## Safety
 
 Seedora is a development tool and defaults to assuming you did not mean to run it against production.
