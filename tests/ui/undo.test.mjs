@@ -84,3 +84,105 @@ test("resetHistory clears both stacks", () => {
   assert.equal(app.canUndo(), false);
   assert.equal(app.canRedo(), false);
 });
+
+// The round trip. api() is replaced with one that echoes the plan back the way
+// the server does, so the stack can be exercised without a server: what is
+// under test is which plan gets sent, not what the server does with it.
+function withServer() {
+  const { app, state } = fresh();
+  const sent = [];
+  app.api = async (method, path, body) => {
+    sent.push({ method, path, plan: structuredClone(body) });
+    return { connected: true, plan: structuredClone(body), schema: { tables: [] } };
+  };
+  // applyState touches the DOM through element ids the harness stub answers
+  // happily, so it needs no further help. If it turns out to reach further than
+  // the stub goes — a real box measurement, say — replace it too and assert on
+  // what pushPlan sent, which is what these tests are actually about:
+  //
+  //   app.applyState = (s) => { state.plan = s.plan; state.schema = s.schema; };
+  //
+  // Do that only if it actually throws. The narrower stub is the better test.
+  return { app, state, sent };
+}
+
+test("committing an edit records the plan as it was", async () => {
+  const { app, state } = withServer();
+
+  state.plan.tables.users.rows = 500;
+  await app.pushPlan("row count");
+
+  assert.equal(app.canUndo(), true);
+  assert.equal(app.undoLabel(), "row count");
+});
+
+test("an unlabelled commit records nothing", async () => {
+  const { app, state } = withServer();
+
+  state.plan.tables.users.rows = 500;
+  await app.pushPlan();
+
+  assert.equal(app.canUndo(), false,
+    "saving before a run is not an edit and must not be undoable");
+});
+
+test("undo sends the previous plan and can be redone", async () => {
+  const { app, state, sent } = withServer();
+
+  state.plan.tables.users.rows = 500;
+  await app.pushPlan("row count");
+  await app.undo();
+
+  assert.equal(sent[sent.length - 1].plan.tables.users.rows, 100,
+    "undo did not send the plan as it was before the edit");
+  assert.equal(app.canUndo(), false);
+  assert.equal(app.canRedo(), true);
+  assert.equal(app.redoLabel(), "row count");
+
+  await app.redo();
+  assert.equal(sent[sent.length - 1].plan.tables.users.rows, 500);
+  assert.equal(app.canUndo(), true);
+  assert.equal(app.canRedo(), false);
+});
+
+test("several edits undo in reverse order", async () => {
+  const { app, state, sent } = withServer();
+
+  for (const n of [200, 300, 400]) {
+    state.plan.tables.users.rows = n;
+    await app.pushPlan(`set ${n}`);
+  }
+
+  await app.undo();
+  assert.equal(sent[sent.length - 1].plan.tables.users.rows, 300);
+  await app.undo();
+  assert.equal(sent[sent.length - 1].plan.tables.users.rows, 200);
+  await app.undo();
+  assert.equal(sent[sent.length - 1].plan.tables.users.rows, 100);
+  assert.equal(app.canUndo(), false);
+});
+
+test("a rejected commit records nothing", async () => {
+  const { app, state } = fresh();
+  app.api = async () => { throw new Error("the server said no"); };
+
+  state.plan.tables.users.rows = 500;
+  await app.pushPlan("row count");
+
+  assert.equal(app.canUndo(), false,
+    "an edit the server refused never happened, so there is nothing to undo");
+});
+
+test("a rejected undo leaves the stack where it was", async () => {
+  const { app, state } = withServer();
+
+  state.plan.tables.users.rows = 500;
+  await app.pushPlan("row count");
+
+  app.api = async () => { throw new Error("the server said no"); };
+  await app.undo();
+
+  assert.equal(app.canUndo(), true,
+    "the undo failed, so the edit is still there to be undone");
+  assert.equal(app.canRedo(), false);
+});
