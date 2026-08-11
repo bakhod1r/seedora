@@ -107,7 +107,14 @@ func keyColumns(t *model.Table, tp *plan.TablePlan) []string {
 		}
 		// Unique in the plan or in the database: a one-to-one is either, and
 		// the database's answer is the one that will be enforced.
-		if cp.Unique || c.Unique {
+		//
+		// Being the primary key counts, and has to be asked separately.
+		// Column.Unique is read from the unique indexes, and a single-column
+		// primary key does not always have one to read — on SQLite an INTEGER
+		// PRIMARY KEY is the rowid, so pragma_index_list reports nothing at
+		// all. The column is still unique, and a foreign key that is also the
+		// primary key is the most ordinary one-to-one there is.
+		if cp.Unique || c.Unique || soleKey(t, c.Name) {
 			out = append(out, c.Name)
 		}
 	}
@@ -119,6 +126,12 @@ func keyColumns(t *model.Table, tp *plan.TablePlan) []string {
 		return out[:1]
 	}
 	return out
+}
+
+// soleKey reports whether a column is the table's entire primary key, and so
+// unique whether or not an index says so.
+func soleKey(t *model.Table, col string) bool {
+	return len(t.PrimaryKey) == 1 && t.PrimaryKey[0] == col
 }
 
 // assign writes row idx's combination over whatever the generator produced for

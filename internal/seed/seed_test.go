@@ -42,13 +42,20 @@ CREATE TABLE orders (
 // landed needs a second connection.
 func open(t *testing.T) (db.Driver, *model.Schema, *sql.DB) {
 	t.Helper()
+	return openWith(t, schemaSQL)
+}
+
+// openWith is open against a schema of the test's choosing, for the shapes the
+// standard two tables do not have.
+func openWith(t *testing.T, ddl string) (db.Driver, *model.Schema, *sql.DB) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
 
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(schemaSQL); err != nil {
+	if _, err := raw.Exec(ddl); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { raw.Close() })

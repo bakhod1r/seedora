@@ -530,7 +530,17 @@ func resolveFKs(
 			}
 			k = placeholderKeys()
 		}
-		cache[ref] = k
+		// An empty pool is not cached. Everything else about a parent is
+		// settled by the time it is read, but emptiness is not: a table that
+		// references itself resolves its own key column before a single row of
+		// it has been written, and that read is legitimately empty. Caching it
+		// would hand the same empty pool to every later child of that table,
+		// which is a NULL in a column the schema says is NOT NULL — and the run
+		// then fails two tables further on, naming a column whose plan is
+		// perfectly correct.
+		if len(k) > 0 {
+			cache[ref] = k
+		}
 		out[col] = k
 	}
 	return out, nil
