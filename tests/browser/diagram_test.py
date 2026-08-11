@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 
 import pytest
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("SEEDORA_TEST_PORT", "7801"))
@@ -322,9 +322,10 @@ def test_the_page_is_usable_at_a_laptop_width(browser, server):
 
 
 def test_undo_reverses_an_edit(page):
-    """The gesture end to end: change a row count, take it back.
+    """The gesture end to end: change a row count, take it back via the
+    button, and confirm the server (not just the page) has the old value.
 
-    tests/ui/ proves the stack; this proves the keystroke reaches it and the
+    tests/ui/ proves the stack; this proves the button reaches it and the
     page shows the result, which is the half that needs a browser.
     """
     rows = page.locator("section.table input[type='number']").first
@@ -332,16 +333,51 @@ def test_undo_reverses_an_edit(page):
 
     rows.fill("4321")
     rows.dispatch_event("change")
-    page.wait_for_timeout(500)
 
     undo_button = page.locator("#btn-undo")
-    assert not undo_button.is_disabled(), "the edit did not become undoable"
+    expect(undo_button).to_be_enabled()
 
     undo_button.click()
-    page.wait_for_timeout(600)
+    expect(rows).to_have_value(original)
+    expect(page.locator("#btn-redo")).to_be_enabled()
+    assert page.errors == [], f"console errors: {page.errors}"
 
-    assert rows.input_value() == original, "undo did not restore the row count"
-    assert page.locator("#btn-redo").is_disabled() is False, "the edit is not redoable"
+    # Undo goes through the server, not a local revert: a reload must still
+    # show the restored value, the same way test_dragging_a_card_moves_it_
+    # and_keeps_it proves a drag survives one.
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("section.table")
+    rows_after_reload = page.locator("section.table input[type='number']").first
+    expect(rows_after_reload).to_have_value(original)
+
+
+def test_undo_reverses_an_edit_via_keystroke(page):
+    """Cmd-Z / Ctrl-Z is the gesture that needs a real browser: `keydown`
+    handling is invisible to tests/ui/'s vm harness. This drives the
+    keystroke, not the button, and proves redo's keystroke too.
+    """
+    rows = page.locator("section.table input[type='number']").first
+    original = rows.input_value()
+
+    rows.fill("5150")
+    rows.dispatch_event("change")
+
+    undo_button = page.locator("#btn-undo")
+    expect(undo_button).to_be_enabled()
+
+    # The handler deliberately ignores the keystroke while a text field has
+    # focus, so blur the row-count input before pressing it.
+    page.locator("body").click()
+    # Control+z works on both platforms: the handler checks
+    # `e.metaKey || e.ctrlKey`.
+    page.keyboard.press("Control+z")
+    expect(rows).to_have_value(original)
+
+    redo_button = page.locator("#btn-redo")
+    expect(redo_button).to_be_enabled()
+    page.keyboard.press("Control+Shift+z")
+    expect(rows).to_have_value("5150")
+
     assert page.errors == [], f"console errors: {page.errors}"
 
 
