@@ -126,6 +126,13 @@ schema instead of overwriting it, `plan.Merge` no longer replaces it, and
 `spec.columnOrder` prefers it. A bulk load still writes in catalog order, which
 is what the wire protocol expects.
 
+- **Undo** covers plan edits, fed from `pushPlan` — the one place that knows an
+  edit happened and the server took it. The whole plan is snapshotted rather
+  than a diff, bounded at 25; an edit the server refused records nothing, and a
+  failed undo restores the stack. Schema changes are deliberately not covered:
+  they are applied in a transaction after a SQL review, and undoing an applied
+  `DROP TABLE` would mean inventing a table this tool never saw.
+
 ## Bugs found and fixed
 
 - A composite primary key emitted an inline `PRIMARY KEY` per column *and* a
@@ -153,8 +160,8 @@ is what the wire protocol expects.
   headlessly and tests the router and the layout relaxation against boxes it
   supplies. `tests/browser/` drives a real Chromium: the layout as the browser
   computes it, edges checked against what was actually rendered, dragging,
-  folding, zoom, and a seeding run driven from the UI. Still uncovered: undo,
-  the schema editor's dialogs, and the context menus.
+  folding, zoom, and a seeding run driven from the UI. Still uncovered: the
+  schema editor's dialogs and the context menus.
 - The index suggestion the README mentions does not exist, and the README says
   so.
 - The integration tests in `tests/` cover whichever engines the environment

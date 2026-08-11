@@ -133,6 +133,10 @@ The picker shows every generator, with the ones matching the column's type first
 
 Click **Preview** on any table to generate a few rows and see what the current mapping actually produces. It writes nothing.
 
+Undo takes back the last plan edit — a generator, a row count, a reference you drew, a column you reordered — with `Cmd-Z` or `Ctrl-Z`, and `Shift` reverses that. It goes through the server like any other change, so the file on disk and the page never disagree about what the plan is.
+
+It covers plan edits and nothing else, which is a decision rather than a gap. A schema change is reviewed as SQL and applied in a transaction, so the place to change your mind about one is the dialog that shows you the statements — undoing an applied `DROP TABLE` would mean this tool inventing a table it never saw. The diagram's layout has **Tidy up**, which recomputes it from the foreign keys. And connecting to another database clears the history, because a stored plan describes tables the new database may not have.
+
 ### 4. Seed
 
 Tables are topologically sorted so parents are inserted before children, and child rows draw their foreign keys from the parent IDs actually written in the same run. Unique columns are backed by a collision-checked pool rather than retried at random: a collision is repaired from the row's index, which no other row shares, so a 100k-row unique email column does not degrade as it fills.
