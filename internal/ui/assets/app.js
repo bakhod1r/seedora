@@ -1148,7 +1148,7 @@ function columnRow(t, c, cp) {
   badge.title = cp.why || "";
   row.appendChild(badge);
 
-  row.addEventListener("click", () => select(t.name, c.name));
+  row.addEventListener("click", () => selectAndFocus(t, c, cp));
   return row;
 }
 
@@ -1890,6 +1890,46 @@ function focusTable(name) {
   app.focus = app.focus === name ? null : name;
   applyFocus();
   drawEdges();
+}
+
+// selectAndFocus is what clicking a column row does.
+//
+// The column itself is selected, which opens the inspector and marks the row.
+// The canvas then lights the table the click is *about*: for a foreign key that
+// is the table it points at, which is the question a person clicking a key
+// column is asking — where does this go? For every other column there is no
+// other table involved, so its own card lights instead.
+//
+// Clicking the same column again puts the canvas back, so a look at a
+// relationship does not have to be undone by hunting for empty space.
+function selectAndFocus(t, c, cp) {
+  const same = app.sel && app.sel.table === t.name && app.sel.column === c.name;
+  select(t.name, c.name);
+
+  const parent = parentOf(t, c, cp);
+  if (same && app.focus !== null) {
+    setFocus(null);
+    return;
+  }
+  setFocus(parent || t.name);
+  // Only when it is a different card, and only when it is not already on
+  // screen: scrolling the canvas out from under a click that landed where the
+  // person was looking is worse than leaving it where it is.
+  if (parent) revealTable(parent);
+}
+
+// revealTable scrolls a card into view if part of it is outside the board.
+function revealTable(name) {
+  const card = cardOf(name);
+  const board = $("board");
+  if (!card || !board) return;
+
+  const c = card.getBoundingClientRect();
+  const b = board.getBoundingClientRect();
+  if (c.left >= b.left && c.right <= b.right && c.top >= b.top && c.bottom <= b.bottom) {
+    return;
+  }
+  card.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
 }
 
 function applyFocus() {

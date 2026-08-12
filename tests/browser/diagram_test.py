@@ -386,3 +386,82 @@ def test_undo_is_disabled_with_nothing_to_undo(page):
     offering an action that would do nothing."""
     assert page.locator("#btn-undo").is_disabled()
     assert page.locator("#btn-redo").is_disabled()
+
+
+def a_foreign_key_column(page):
+    """The first column row that references another table, with the table it
+    points at. Read from the page rather than hard-coded so the test follows
+    the demo schema rather than a copy of it."""
+    return page.evaluate("""() => {
+        for (const row of document.querySelectorAll('section.table .col')) {
+            const key = row.querySelector('.col-key.fk');
+            const m = key && /^references (.+)\\.[^.]+$/.exec(key.title || '');
+            if (m) return {table: row.dataset.table, column: row.dataset.column, parent: m[1]};
+        }
+        return null;
+    }""")
+
+
+def test_clicking_a_key_column_lights_the_table_it_points_at(page):
+    """The question a person clicking a foreign key is asking is where the
+    value comes from, so the answer is the card that gets lit."""
+    fk = a_foreign_key_column(page)
+    assert fk, "the demo schema has no foreign key to click"
+
+    page.locator(f"section.table[data-table='{fk['table']}'] "
+                 f".col[data-column='{fk['column']}']").click()
+    page.wait_for_timeout(300)
+
+    focused = page.evaluate("() => app.focus")
+    assert focused == fk["parent"], f"clicked {fk['column']}, lit {focused}"
+    assert page.locator(f"section.table[data-table='{fk['parent']}']").evaluate(
+        "c => c.classList.contains('focused')")
+    assert page.locator(f"section.table[data-table='{fk['table']}'] "
+                        f".col[data-column='{fk['column']}']").evaluate(
+        "r => r.classList.contains('selected')"), "the clicked row was not marked"
+    assert page.errors == [], f"console errors: {page.errors}"
+
+
+def test_clicking_the_same_column_again_puts_the_canvas_back(page):
+    fk = a_foreign_key_column(page)
+    row = page.locator(f"section.table[data-table='{fk['table']}'] "
+                       f".col[data-column='{fk['column']}']")
+    row.click()
+    page.wait_for_timeout(200)
+    assert page.evaluate("() => app.focus") == fk["parent"], "the first click lit nothing"
+
+    row.click()
+    page.wait_for_timeout(200)
+    assert page.evaluate("() => app.focus") is None, "a second click left it lit"
+
+
+def test_clicking_a_plain_column_lights_its_own_table(page):
+    """A column with no reference involves no other table, so the card it is
+    on is the one worth lighting."""
+    plain = page.evaluate("""() => {
+        for (const row of document.querySelectorAll('section.table .col')) {
+            if (!row.querySelector('.col-key.fk')) {
+                return {table: row.dataset.table, column: row.dataset.column};
+            }
+        }
+        return null;
+    }""")
+    assert plain, "every column in the demo schema is a foreign key"
+
+    page.locator(f"section.table[data-table='{plain['table']}'] "
+                 f".col[data-column='{plain['column']}']").click()
+    page.wait_for_timeout(300)
+    assert page.evaluate("() => app.focus") == plain["table"]
+
+
+def test_clicking_a_table_header_lights_that_table(page):
+    """The header is the whole-table gesture, and it must not be swallowed by
+    the controls sitting in it."""
+    name = page.locator("section.table").first.get_attribute("data-table")
+    page.locator(f"section.table[data-table='{name}'] .table-name").click()
+    page.wait_for_timeout(300)
+
+    assert page.evaluate("() => app.focus") == name
+    assert page.locator(f"section.table[data-table='{name}']").evaluate(
+        "c => c.classList.contains('focused')")
+    assert page.errors == [], f"console errors: {page.errors}"
