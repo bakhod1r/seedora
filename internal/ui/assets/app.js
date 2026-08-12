@@ -599,6 +599,7 @@ function tableCard(t, tp) {
   makeRelationTarget(card, t);
 
   const editing = app.editing.has(t.name);
+  if (editing) card.classList.add("editing");
   if (droppingTable(t.name)) card.classList.add("dropping");
   if (collapsed) {
     // The column count stands in for the columns themselves, so a folded card
@@ -635,7 +636,7 @@ function tableCard(t, tp) {
   foot.appendChild(preview);
 
   const edit = el("button", "btn btn-quiet", editing ? "Done" : "Edit");
-  edit.title = "Add or drop columns on this table";
+  edit.title = "Add or drop columns on this table — dropping the table itself is in its menu";
   edit.addEventListener("click", () => {
     if (editing) app.editing.delete(t.name);
     else app.editing.add(t.name);
@@ -654,14 +655,22 @@ function tableCard(t, tp) {
     });
     foot.appendChild(add);
 
-    const drop = el("button", "btn btn-quiet", droppingTable(t.name) ? "Keep table" : "Drop table");
-    drop.classList.add("danger-quiet");
-    drop.addEventListener("click", () => toggleDropTable(t.name));
-    foot.appendChild(drop);
+    // Dropping the table lives in the card's own menu. A fourth button does
+    // not fit across 300px — it and the hint below it used to hang off the
+    // side of the card — and the one irreversible action here is better placed
+    // where it cannot be hit while reaching for "+ column".
+    if (droppingTable(t.name)) {
+      const keep = el("button", "btn btn-quiet danger-quiet", "Keep table");
+      keep.addEventListener("click", () => toggleDropTable(t.name));
+      foot.appendChild(keep);
+    }
   }
 
+  // The count of guesses is a resting-state hint, and edit mode needs the room.
   const guesses = Object.values(tp.columns).filter((x) => x.confidence === "low").length;
-  if (guesses > 0) foot.appendChild(el("span", "field-hint", `${guesses} to check`));
+  if (guesses > 0 && !editing) {
+    foot.appendChild(el("span", "field-hint", `${guesses} to check`));
+  }
 
   foot.appendChild(el("div", "spacer"));
 
@@ -1237,17 +1246,8 @@ function openHueMenu(table, anchor) {
     grid.appendChild(dot);
   }
 
-  // Positioned against the swatch. The popover lives in the top layer, so the
-  // coordinates are viewport coordinates and no ancestor can clip it.
   hueMenu.showPopover();
-  const box = anchor.getBoundingClientRect();
-  const menu = hueMenu.getBoundingClientRect();
-  const left = Math.min(box.left, window.innerWidth - menu.width - 8);
-  const top = box.bottom + menu.height > window.innerHeight
-    ? box.top - menu.height - 6
-    : box.bottom + 6;
-  hueMenu.style.left = Math.max(8, left) + "px";
-  hueMenu.style.top = Math.max(8, top) + "px";
+  placePopover(hueMenu, anchor);
 }
 
 // ---------------------------------------------------------------- layout
@@ -3811,12 +3811,15 @@ function columnEditor(col, onRemove) {
   flags.appendChild(flag("U", "Unique", !!col.unique, (on) => (col.unique = on)));
   row.appendChild(flags);
 
-  const ref = el("input", "col-edit-ref");
-  ref.value = col.references || "";
-  ref.placeholder = "references table.column";
-  ref.spellcheck = false;
+  // The reference is one control, not a field of its own. Most columns are not
+  // foreign keys, and a full-width input for each one turned a card being
+  // edited into three times the height of the same card at rest — the diagram
+  // reflowed around it and the table stopped looking like the table.
+  const ref = el("button", "col-ref" + (col.references ? " on" : ""), "→");
+  ref.type = "button";
   ref.setAttribute("aria-label", "Foreign key");
-  ref.addEventListener("input", () => (col.references = ref.value.trim()));
+  refTitle(ref, col);
+  ref.addEventListener("click", () => openRefMenu(col, ref));
   row.appendChild(ref);
 
   const remove = el("button", "col-drop", "×");
@@ -3826,6 +3829,62 @@ function columnEditor(col, onRemove) {
   row.appendChild(remove);
 
   return row;
+}
+
+function refTitle(button, col) {
+  button.title = col.references
+    ? `References ${col.references}`
+    : "Make this column a foreign key";
+}
+
+// openRefMenu edits one column's reference in a popover anchored to its row.
+//
+// The popover is in the top layer, so it can be wider than the card it belongs
+// to without the card growing to hold it — which is the whole point of it being
+// a popover rather than a field.
+const refMenu = $("ref-menu");
+const refMenuInput = $("ref-menu-input");
+let refMenuFor = null;
+
+function openRefMenu(col, anchor) {
+  refMenuFor = { col, anchor };
+  refMenuInput.value = col.references || "";
+  refMenu.showPopover();
+  placePopover(refMenu, anchor);
+  refMenuInput.focus();
+  refMenuInput.select();
+}
+
+refMenuInput.addEventListener("input", () => {
+  if (!refMenuFor) return;
+  const { col, anchor } = refMenuFor;
+  col.references = refMenuInput.value.trim();
+  anchor.classList.toggle("on", !!col.references);
+  refTitle(anchor, col);
+  syncChangeBar();
+});
+
+refMenuInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); refMenu.hidePopover(); }
+});
+
+refMenu.addEventListener("toggle", (e) => {
+  if (e.newState === "closed") refMenuFor = null;
+});
+
+// placePopover puts a popover under its anchor, flipping above it and pulling
+// it inside the window rather than letting it hang off an edge. The popover
+// lives in the top layer, so these are viewport coordinates and no ancestor can
+// clip it.
+function placePopover(pop, anchor) {
+  const box = anchor.getBoundingClientRect();
+  const menu = pop.getBoundingClientRect();
+  const left = Math.min(box.left, window.innerWidth - menu.width - 8);
+  const top = box.bottom + menu.height > window.innerHeight
+    ? box.top - menu.height - 6
+    : box.bottom + 6;
+  pop.style.left = Math.max(8, left) + "px";
+  pop.style.top = Math.max(8, top) + "px";
 }
 
 function flag(label, title, on, onToggle) {

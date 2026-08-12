@@ -465,3 +465,93 @@ def test_clicking_a_table_header_lights_that_table(page):
     assert page.locator(f"section.table[data-table='{name}']").evaluate(
         "c => c.classList.contains('focused')")
     assert page.errors == [], f"console errors: {page.errors}"
+
+
+def card_size(page, name):
+    return page.evaluate("""(n) => {
+        const r = document.querySelector(`section.table[data-table='${n}']`).getBoundingClientRect();
+        return {w: Math.round(r.width), h: Math.round(r.height)};
+    }""", name)
+
+
+def test_edit_mode_does_not_resize_the_card(page):
+    """Pressing Edit used to add two thirds to a card's height before anything
+    was edited — every column row gained a grid row for its drop button, and the
+    foot grew a fourth button. The diagram reflowed around a table that had not
+    changed."""
+    name = page.locator("section.table").first.get_attribute("data-table")
+    before = card_size(page, name)
+
+    page.evaluate("(n) => { app.editing.add(n); renderDiagram(); }", name)
+    page.wait_for_timeout(400)
+
+    after = card_size(page, name)
+    assert after["w"] == before["w"], "Edit mode changed the width of the card"
+    # A pixel of rounding is the drop button against the row's min-height. Two
+    # thirds of the card's height, which is what this used to cost, is not.
+    assert abs(after["h"] - before["h"]) <= 2, \
+        f"Edit mode changed the height of the card: {before['h']} to {after['h']}"
+    assert page.errors == [], f"console errors: {page.errors}"
+
+
+def test_the_edit_foot_stays_inside_the_card(page):
+    """A card is 300px wide and does not clip, so anything too wide for the
+    foot hangs off the side of it."""
+    name = page.locator("section.table").first.get_attribute("data-table")
+    page.evaluate("(n) => { app.editing.add(n); renderDiagram(); }", name)
+    page.wait_for_timeout(400)
+
+    over = page.evaluate("""(n) => {
+        const c = document.querySelector(`section.table[data-table='${n}']`);
+        const f = c.querySelector('.table-foot');
+        return f.scrollWidth - f.clientWidth;
+    }""", name)
+    assert over <= 0, f"the foot overflows its card by {over}px"
+
+
+def test_an_editable_column_is_one_row_high(page):
+    """The editor for a column occupies the row the column already occupies,
+    so adding one to a table costs exactly one row of height."""
+    name = page.locator("section.table").first.get_attribute("data-table")
+    page.evaluate("(n) => { app.editing.add(n); renderDiagram(); }", name)
+    page.wait_for_timeout(300)
+    before = card_size(page, name)
+
+    page.evaluate("""(n) => { app.pending.push({kind: 'add_column', table: n,
+        columns: [{name: '', type: 'INTEGER', nullable: true}]}); renderDiagram(); }""", name)
+    page.wait_for_timeout(400)
+
+    grew = card_size(page, name)["h"] - before["h"]
+    settled = page.evaluate("""(n) => Math.round(document.querySelector(
+        `section.table[data-table='${n}'] .col`).getBoundingClientRect().height)""", name)
+    assert abs(grew - settled) <= 2, \
+        f"one added column cost {grew}px where a column row is {settled}px"
+
+
+def test_the_reference_is_edited_in_a_popover(page):
+    """The reference field was full width and wrapped, which is what made an
+    edited column three rows tall. It is a control that opens a popover now,
+    and the popover is in the top layer, so the card does not grow to hold it.
+    """
+    name = page.locator("section.table").first.get_attribute("data-table")
+    page.evaluate("(n) => { app.editing.add(n); app.pending.push({kind: 'add_column', table: n, "
+                  "columns: [{name: 'thing_id', type: 'INTEGER', nullable: true}]}); renderDiagram(); }", name)
+    page.wait_for_timeout(400)
+    before = card_size(page, name)
+
+    page.locator(f"section.table[data-table='{name}'] .col-ref").first.click()
+    page.wait_for_timeout(300)
+    page.keyboard.type("users.id")
+    page.wait_for_timeout(200)
+
+    after = card_size(page, name)
+    assert after["w"] == before["w"] and abs(after["h"] - before["h"]) <= 2, \
+        f"the popover grew the card: {before} to {after}"
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(200)
+
+    refs = page.evaluate("() => app.pending.map(c => c.columns && c.columns[0].references)")
+    assert "users.id" in refs, f"the reference was not recorded: {refs}"
+    assert page.locator(f"section.table[data-table='{name}'] .col-ref.on").count() == 1, \
+        "the control does not show that this column now references something"
+    assert page.errors == [], f"console errors: {page.errors}"
