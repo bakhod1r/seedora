@@ -10,14 +10,121 @@ it.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-12
+
+### Added
+
+- **`seedora dump`, writing generated rows to files.** The same run — same
+  plan, same insertion order, same foreign keys and uniqueness — with only the
+  destination changed: one file per table, in `csv`, `json`, or `sql`.
+  `internal/export` is a `db.Driver` and a `db.Tx` rather than a second code
+  path, so a fixture is the data the seeder would have written. The schema
+  still comes from a real database; nothing is written to it and the
+  transaction is rolled back. Children point at rows in the fixture rather
+  than at rows in a database the fixture will never be loaded into, a primary
+  key the database would have assigned is assigned here instead (single-column
+  integer keys only), and a `DECIMAL(10,2)` is written with two decimal places
+  rather than a binary float's worth. Nothing reaches disk before commit, so a
+  failed run leaves no partial fixture.
+- **`--append`, for topping up a table that already has rows.** A run assumes
+  its tables are empty and a second one fails on the first unique column it
+  collides with. With `--append` nothing is emptied — including tables the
+  plan asks to truncate, since that setting describes a run starting from
+  empty — and every unique column is read back before the first row is
+  generated, so the new rows are unique against the old. An integer collision
+  counts on from the largest existing value. Refused with `--truncate`, whose
+  meaning is the opposite, and on a join table, whose uniqueness is over the
+  pair of foreign keys and cannot be read back one column at a time. Covered
+  against SQLite, PostgreSQL and MySQL.
+- **Undo and redo for plan edits**, on the toolbar and on `Cmd-Z` /
+  `Cmd-Shift-Z`, over a bounded history of plan snapshots. Every plan edit
+  already commits through `pushPlan`, so that is where a snapshot is taken and
+  no individual edit has to remember. Both directions go through the server
+  rather than reverting locally, a commit the server refuses records nothing,
+  and the keystroke is ignored while a text field has focus. Connecting to
+  another database clears the history. Scope is plan edits: schema changes,
+  layout, and a committed run are each excluded — an applied `DROP TABLE` is
+  not this tool's to reverse.
+- **Clicking a key column lights the table it references**, scrolling it into
+  view if it was off the board. A column with no reference lights its own
+  card; a second click puts the canvas back.
+- Motion for the edit controls, matching the rest of the page and listed in
+  the reduced-motion switch that was already there.
+- `make pg-up`, `make pg-down`, and `make test-all`, the Postgres counterparts
+  to the MySQL pair plus one target that runs everything against both.
+
+### Security
+
+- **The UI answers only requests from Seedora's own page.** It holds a live
+  database connection and has no password, and binding to loopback does not
+  make it private: any page in the same browser can `POST` to
+  `127.0.0.1:7777`, and a domain resolved to `127.0.0.1` is treated by the
+  browser as that domain's own origin, which an `Origin` check alone cannot
+  distinguish. Two checks now run on every route — `Sec-Fetch-Site` and
+  `Origin` for where the request came from, `Host` for whether it was
+  addressed to Seedora rather than to a rebound name. Reads are covered as
+  well as writes: `/api/state` carries the schema and `/api/connections`
+  carries every DSN this machine has connected to. Requests with neither
+  header are allowed — `curl`, CI, the tests — since no web page can produce
+  one. Binding past loopback with `--host` relaxes the `Host` check alone.
+
 ### Fixed
 
+- **Two ways a 23-table schema failed to seed**, neither of which appears in a
+  two-table one. A self-reference poisoned the foreign-key pool: an empty pool
+  read before its own table had rows was cached, and every later child of that
+  table got a cache hit on it. An empty pool is no longer cached. And a
+  primary key that is also a foreign key was not seen as a one-to-one, because
+  `Column.Unique` is read from the unique indexes and a single-column primary
+  key does not always have one — on SQLite an `INTEGER PRIMARY KEY` is the
+  rowid and `pragma_index_list` reports nothing. Being the sole primary key
+  now counts as unique.
 - **Folded cards no longer overlap.** A card's position was computed once and
   then kept, so it was still the position worked out for the height the card
   had at the time. Folding or unfolding changes that height, and the diagram
   ended up with cards written over each other. Positions are now recomputed
   from the current heights whenever the diagram is laid out, and only a card
   someone has dragged by hand stays where they put it.
+- **A card stays the same size when it is being edited.** Pressing Edit grew a
+  card by two thirds before anything had been edited. The reference field is
+  now a popover in the top layer rather than a full-width control inside the
+  card, column rows in edit mode get a track for their drop button, and
+  dropping a table moved to the card's menu. Toggling Edit now changes a
+  card's height by at most a pixel of rounding.
+- **Seven undo defects** found by a whole-branch review, two of which lost
+  work in ordinary use: `applyState` is now the single place that maintains
+  `history.base`, so an undo after an import no longer discards the import;
+  and `serialize()` chains `pushPlan`, `undo` and `redo`, closing the race an
+  autorepeating `Cmd-Z` opened against a last-write-wins server.
+- **The Postgres integration tests never ran.** They opened the database with
+  `sql.Open("pgx", …)` but nothing imported `pgx/v5/stdlib`, so no driver by
+  that name was registered — and the error was handled with `t.Skipf`, so CI
+  set `SEEDORA_TEST_POSTGRES`, every subtest skipped, and the run reported
+  success without executing. The driver is imported, and a target named by an
+  environment variable that cannot be reached is now `t.Fatalf`.
+- A `.pyc` from the browser tests was tracked. Untracked, and `.gitignore` now
+  covers Python bytecode and the virtualenv.
+
+### Changed
+
+- The README's `~2,000,000 rows/s` generation claim is replaced with the
+  measured figures, the machine they came from, and the command to rerun them.
+  It also now documents `--append`, `seedora dump`, `--host`, and the other
+  flags the table had been missing.
+
+### Testing
+
+- **The page in a real browser.** Twenty-four Playwright tests over Chromium
+  against the 23-table demo schema: no console errors, every table drawn, no
+  two cards overlapping at their rendered heights, no edge passing under a
+  card, drags surviving a reload, folding, the inspector, zoom-to-fit, a
+  seeding run watched over SSE, and no sideways scroll at 1280px. The
+  dependency list is deliberately outside the build — nothing here is needed
+  to compile, run, or ship Seedora. These found the two seeding bugs above.
+- **The diagram's router and layout**, thirty-two headless tests under node's
+  own test runner, with no `package.json` and no bundler: `app.js` is loaded
+  in a `vm` against a stubbed DOM. All 600 ordered pairs of a 5x5 grid get a
+  route crossing no other card.
 
 ## [0.3.0] — 2026-08-06
 
@@ -174,6 +281,8 @@ First public version.
   handling, and a fixed `--seed` for reproducible runs.
 - The production-target guard.
 
-[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.4.0
+[0.3.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.3.0
 [0.2.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.2.0
 [0.1.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.1.0
