@@ -19,6 +19,10 @@ import (
 
 	// Drivers register themselves, so linking one in is what enables its DSN
 	// scheme. Adding an engine is an import here and a package under internal/db.
+	// The engines in the default build live in drivers_default.go; the rest are
+	// behind build tags, one file per tag set. Which engines a binary has is
+	// therefore a property of how it was built, and `seedora --help` lists what
+	// this one actually carries.
 	_ "github.com/bakhod1r/seedora/internal/db/mysql"
 	_ "github.com/bakhod1r/seedora/internal/db/postgres"
 	_ "github.com/bakhod1r/seedora/internal/db/sqlite"

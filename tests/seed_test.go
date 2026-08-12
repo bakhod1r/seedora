@@ -103,16 +103,35 @@ type target struct {
 	raw    *sql.DB
 }
 
-// targets returns every engine available on this machine. Postgres is included
-// only when a DSN says which database it may destroy.
+// wireCompatible names the engines that speak an existing driver's protocol.
+// They get no driver code of their own: the same DSN scheme, the same schema,
+// and the same assertions decide whether the claim that they work is true.
+var (
+	postgresWire = []struct{ name, env string }{
+		{"postgres", "SEEDORA_TEST_POSTGRES"},
+		{"cockroach", "SEEDORA_TEST_COCKROACH"},
+		{"yugabyte", "SEEDORA_TEST_YUGABYTE"},
+	}
+	mysqlWire = []struct{ name, env string }{
+		{"mysql", "SEEDORA_TEST_MYSQL"},
+		{"tidb", "SEEDORA_TEST_TIDB"},
+	}
+)
+
+// targets returns every engine available on this machine. A server engine is
+// included only when a DSN says which database it may destroy.
 func targets(t *testing.T) []target {
 	t.Helper()
 	out := []target{openSQLite(t)}
-	if dsn := os.Getenv("SEEDORA_TEST_POSTGRES"); dsn != "" {
-		out = append(out, openPostgres(t, dsn))
+	for _, e := range postgresWire {
+		if dsn := os.Getenv(e.env); dsn != "" {
+			out = append(out, openPostgres(t, e.name, e.env, dsn))
+		}
 	}
-	if dsn := os.Getenv("SEEDORA_TEST_MYSQL"); dsn != "" {
-		out = append(out, openMySQL(t, dsn))
+	for _, e := range mysqlWire {
+		if dsn := os.Getenv(e.env); dsn != "" {
+			out = append(out, openMySQL(t, e.name, e.env, dsn))
+		}
 	}
 	return out
 }
@@ -133,28 +152,28 @@ func openSQLite(t *testing.T) target {
 	return connect(t, "sqlite", path, raw)
 }
 
-func openPostgres(t *testing.T, dsn string) target {
+func openPostgres(t *testing.T, name, env, dsn string) target {
 	t.Helper()
 
-	// Fatal, not Skip. SEEDORA_TEST_POSTGRES is set by somebody who wants these
+	// Fatal, not Skip. The DSN variable is set by somebody who wants these
 	// tests run, and a skip on a broken connection is how they came to be
 	// green in CI for months without ever running.
 	raw, err := sql.Open("pgx", dsn)
 	if err != nil {
-		t.Fatalf("postgres: %v", err)
+		t.Fatalf("%s: %v", name, err)
 	}
 	if err := raw.Ping(); err != nil {
-		t.Fatalf("postgres is not reachable at the DSN in SEEDORA_TEST_POSTGRES: %v", err)
+		t.Fatalf("%s is not reachable at the DSN in %s: %v", name, env, err)
 	}
 	if _, err := raw.Exec(postgresSchema); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { raw.Close() })
 
-	return connect(t, "postgres", dsn, raw)
+	return connect(t, name, dsn, raw)
 }
 
-func openMySQL(t *testing.T, dsn string) target {
+func openMySQL(t *testing.T, name, env, dsn string) target {
 	t.Helper()
 
 	// The raw handle needs the driver's own DSN form, and the statements below
@@ -163,17 +182,17 @@ func openMySQL(t *testing.T, dsn string) target {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Fatal, not Skip, for the same reason as Postgres: SEEDORA_TEST_MYSQL is
+	// Fatal, not Skip, for the same reason as Postgres: the DSN variable is
 	// set by somebody who wants these tests run, and skipping when the DSN does
 	// not work is how a suite stays green without ever having executed.
 	raw, err := sql.Open("mysql", native+"&multiStatements=true")
 	if err != nil {
-		t.Fatalf("mysql: %v", err)
+		t.Fatalf("%s: %v", name, err)
 	}
 	if err := raw.Ping(); err != nil {
-		t.Fatalf("mysql is not reachable at the DSN in SEEDORA_TEST_MYSQL: %v", err)
+		t.Fatalf("%s is not reachable at the DSN in %s: %v", name, env, err)
 	}
-	// The database named by SEEDORA_TEST_MYSQL is one the tests may destroy, and
+	// The database named by the DSN is one the tests may destroy, and
 	// emptying it first is what makes the suite immune to whatever a previous
 	// run — or a previous experiment — left in it. A leftover child table makes
 	// every DROP TABLE below fail on a foreign key.
@@ -185,7 +204,7 @@ func openMySQL(t *testing.T, dsn string) target {
 	}
 	t.Cleanup(func() { raw.Close() })
 
-	return connect(t, "mysql", dsn, raw)
+	return connect(t, name, dsn, raw)
 }
 
 // dropAllMySQL empties the test database. Foreign key checks are off for the

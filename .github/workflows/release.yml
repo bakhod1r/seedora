@@ -9,9 +9,17 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.tags && format(' ({0})', matrix.tags) || '' }}
     runs-on: ubuntu-latest
     strategy:
+      # Five targets for the default build, and the tagged builds on the two
+      # platforms that actually run them. Which engines a binary carries is a
+      # property of how it was built — see cmd/seedora/drivers_*.go — so the
+      # engine sets are artefacts rather than a runtime flag.
+      #
+      # The tagged builds ship for linux and darwin only. Nobody has asked for
+      # Snowflake on windows/arm, and twenty artefacts to serve that guess is
+      # twenty artefacts to keep working.
       matrix:
         include:
           - { goos: darwin,  goarch: arm64 }
@@ -19,6 +27,15 @@ jobs:
           - { goos: linux,   goarch: amd64 }
           - { goos: linux,   goarch: arm64 }
           - { goos: windows, goarch: amd64 }
+
+          - { goos: linux,   goarch: amd64, tags: enterprise }
+          - { goos: darwin,  goarch: arm64, tags: enterprise }
+          - { goos: linux,   goarch: amd64, tags: warehouse }
+          - { goos: darwin,  goarch: arm64, tags: warehouse }
+          - { goos: linux,   goarch: amd64, tags: nosql }
+          - { goos: darwin,  goarch: arm64, tags: nosql }
+          - { goos: linux,   goarch: amd64, tags: all }
+          - { goos: darwin,  goarch: arm64, tags: all }
 
     steps:
       - uses: actions/checkout@v4
@@ -42,14 +59,17 @@ jobs:
           name="seedora"
           [ "$GOOS" = windows ] && name="seedora.exe"
           mkdir -p dist
-          go build -trimpath \
+          tags="${{ matrix.tags }}"
+          go build -trimpath ${tags:+-tags "$tags"} \
             -ldflags "-s -w -X main.version=${version} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -o "dist/${name}" ./cmd/seedora
 
       - name: Package
         run: |
           cd dist
-          base="seedora_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          # The tag set is part of the filename: without it every engine set
+          # would package to the same name and overwrite the last one.
+          base="seedora_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.tags && format('_{0}', matrix.tags) || '' }}"
           cp ../README.md ../LICENSE ../CHANGELOG.md .
           if [ "${{ matrix.goos }}" = windows ]; then
             zip "${base}.zip" seedora.exe README.md LICENSE CHANGELOG.md
@@ -61,7 +81,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: seedora-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: seedora-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.tags && format('-{0}', matrix.tags) || '' }}
           path: |
             dist/*.tar.gz
             dist/*.zip

@@ -29,6 +29,11 @@ func init() {
 // Driver is a connected Postgres database.
 type Driver struct {
 	conn *pgx.Conn
+	// cockroach is set when the server on the other end is CockroachDB rather
+	// than Postgres. It speaks the same wire protocol and answers the same
+	// catalog queries, but a handful of statements are spelled differently; the
+	// flag is read only where that is true, so Postgres behaviour is untouched.
+	cockroach bool
 }
 
 func open(ctx context.Context, dsn string) (db.Driver, error) {
@@ -39,7 +44,14 @@ func open(ctx context.Context, dsn string) (db.Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
-	return &Driver{conn: conn}, nil
+	d := &Driver{conn: conn}
+	// One round trip at connect rather than a guess from the DSN scheme: the
+	// same postgres:// URL reaches either engine, so only the server can say.
+	var version string
+	if err := conn.QueryRow(ctx, "SELECT version()").Scan(&version); err == nil {
+		d.cockroach = strings.Contains(version, "CockroachDB")
+	}
+	return d, nil
 }
 
 func normalizeScheme(dsn string) string {
@@ -118,7 +130,7 @@ func (d *Driver) Begin(ctx context.Context) (db.Tx, error) {
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
-	return &Tx{tx: tx}, nil
+	return &Tx{tx: tx, cockroach: d.cockroach}, nil
 }
 
 // Introspect reads tables, columns, keys, and enum types in four queries rather
@@ -152,7 +164,7 @@ SELECT t.typname, e.enumlabel
 FROM pg_type t
 JOIN pg_enum e ON e.enumtypid = t.oid
 JOIN pg_namespace n ON n.oid = t.typnamespace
-WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'crdb_internal', 'pg_extension')
 ORDER BY t.typname, e.enumsortorder`
 	rows, err := d.conn.Query(ctx, q)
 	if err != nil {
@@ -189,10 +201,13 @@ JOIN pg_class c      ON c.oid = a.attrelid
 JOIN pg_namespace n  ON n.oid = c.relnamespace
 JOIN pg_type t       ON t.oid = a.atttypid
 WHERE c.relkind IN ('r', 'p')
-  AND NOT c.relispartition
+  -- IS NOT TRUE rather than NOT, because a wire-compatible engine may leave
+  -- this column NULL rather than false, and NOT NULL is NULL — which drops
+  -- every table from the result. On Postgres the two spellings agree.
+  AND c.relispartition IS NOT TRUE
   AND a.attnum > 0
   AND NOT a.attisdropped
-  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'crdb_internal', 'pg_extension')
 ORDER BY n.nspname, c.relname, a.attnum`
 
 	rows, err := d.conn.Query(ctx, q)
@@ -258,7 +273,7 @@ LEFT JOIN unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord)
 LEFT JOIN pg_attribute fa
        ON fa.attrelid = con.confrelid AND fa.attnum = fk.attnum
 WHERE con.contype IN ('p', 'u', 'f')
-  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'crdb_internal', 'pg_extension')
 ORDER BY c.relname, con.conname, k.ord`
 
 	rows, err := d.conn.Query(ctx, q)
@@ -327,7 +342,7 @@ WHERE i.indisunique
   AND i.indnkeyatts = 1
   AND NOT i.indisprimary
   AND i.indpred IS NULL
-  AND n.nspname NOT IN ('pg_catalog', 'information_schema')`
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'crdb_internal', 'pg_extension')`
 
 	rows, err := d.conn.Query(ctx, q)
 	if err != nil {
@@ -360,7 +375,7 @@ SELECT c.relname, GREATEST(c.reltuples, 0)::bigint
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p')
-  AND n.nspname NOT IN ('pg_catalog', 'information_schema')`
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'crdb_internal', 'pg_extension')`
 	rows, err := d.conn.Query(ctx, q)
 	if err != nil {
 		return fmt.Errorf("read row estimates: %w", err)
@@ -420,18 +435,57 @@ func atoi(s string) int {
 
 // Tx is a Postgres seeding transaction.
 type Tx struct {
-	tx   pgx.Tx
-	done bool
+	tx        pgx.Tx
+	done      bool
+	cockroach bool
+	// pending holds the tables asked for but not yet truncated, in the order
+	// they were asked for. See Truncate for why they are batched.
+	pending []string
 }
 
 // Truncate implements db.Tx. RESTART IDENTITY resets the sequences behind serial
 // columns, so a re-seed produces the same ids as the first run — which is what
 // makes --seed reproducible across truncate-and-reseed cycles. CASCADE is
 // required because a table with children cannot be truncated without it.
+// CockroachDB has no RESTART IDENTITY: its TRUNCATE takes CASCADE alone, and
+// the sequence behind a serial column keeps counting across a truncate. Ids are
+// then not reproducible there, but the rows are.
+// The tables are collected rather than emptied one statement at a time, and the
+// whole batch goes out as a single TRUNCATE before the transaction does anything
+// else. One statement is what the engines actually agree on: a CASCADE from a
+// parent re-empties a child the seeder already named in its own right, and
+// YugabyteDB rejects a relation truncated twice inside one transaction with
+// `could not open file "base/<db>/0"` — the first truncate leaves it with no
+// file node for the second to reopen. Naming every table in one statement means
+// each is truncated exactly once. Postgres sees the same end state either way,
+// and one round trip rather than one per table.
 func (t *Tx) Truncate(ctx context.Context, tb *model.Table) error {
-	_, err := t.tx.Exec(ctx, "TRUNCATE TABLE "+tb.Qualified()+" RESTART IDENTITY CASCADE")
-	if err != nil {
-		return fmt.Errorf("truncate %s: %w", tb.Name, err)
+	q := tb.Qualified()
+	for _, p := range t.pending {
+		if p == q {
+			return nil
+		}
+	}
+	t.pending = append(t.pending, q)
+	return nil
+}
+
+// flushTruncate empties everything Truncate was asked for. Every other method on
+// the transaction calls it first, so the truncate lands before any read, write,
+// or commit can observe the rows it removes.
+func (t *Tx) flushTruncate(ctx context.Context) error {
+	if len(t.pending) == 0 {
+		return nil
+	}
+	list := strings.Join(t.pending, ", ")
+	t.pending = nil
+
+	stmt := "TRUNCATE TABLE " + list + " RESTART IDENTITY CASCADE"
+	if t.cockroach {
+		stmt = "TRUNCATE TABLE " + list + " CASCADE"
+	}
+	if _, err := t.tx.Exec(ctx, stmt); err != nil {
+		return fmt.Errorf("truncate %s: %w", list, err)
 	}
 	return nil
 }
@@ -439,6 +493,9 @@ func (t *Tx) Truncate(ctx context.Context, tb *model.Table) error {
 // Exec implements db.Tx. The schema editor renders its own SQL and applies it
 // here, inside the transaction it can still roll back.
 func (t *Tx) Exec(ctx context.Context, sql string) error {
+	if err := t.flushTruncate(ctx); err != nil {
+		return err
+	}
 	if _, err := t.tx.Exec(ctx, sql); err != nil {
 		return fmt.Errorf("exec: %w", err)
 	}
@@ -455,6 +512,9 @@ func (t *Tx) Exec(ctx context.Context, sql string) error {
 // on the database. An INSERT per batch would cost a statement per batch and put
 // the two in lockstep.
 func (t *Tx) Insert(ctx context.Context, tb *model.Table, cols []string, rows db.Source) (int64, error) {
+	if err := t.flushTruncate(ctx); err != nil {
+		return 0, err
+	}
 	if len(cols) == 0 {
 		return 0, nil
 	}
@@ -484,6 +544,9 @@ func (t *Tx) Insert(ctx context.Context, tb *model.Table, cols []string, rows db
 // parent rows it returns were written by this same uncommitted run, and any
 // other connection would not see them.
 func (t *Tx) ReadKeys(ctx context.Context, tb *model.Table, col string, limit int) ([]any, error) {
+	if err := t.flushTruncate(ctx); err != nil {
+		return nil, err
+	}
 	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL LIMIT %d",
 		model.QuoteIdent(col), tb.Qualified(), model.QuoteIdent(col), limit)
 	rows, err := t.tx.Query(ctx, q)
@@ -508,6 +571,11 @@ func (t *Tx) ReadKeys(ctx context.Context, tb *model.Table, col string, limit in
 func (t *Tx) Commit(ctx context.Context) error {
 	if t.done {
 		return nil
+	}
+	// A truncate nobody followed with a write is still a truncate that was
+	// asked for, and committing without it would silently leave the rows.
+	if err := t.flushTruncate(ctx); err != nil {
+		return err
 	}
 	t.done = true
 	return t.tx.Commit(ctx)

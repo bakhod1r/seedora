@@ -17,6 +17,29 @@ cloud warehouse SDKs account for most of it.
 | Added if all were linked | ~109 MB |
 | Blocked engines | 1 (DuckDB) |
 
+## Where this stands
+
+Steps 1 through 3 of the order of work below are done, and DuckDB is off the
+list rather than deferred.
+
+- **Verified.** CockroachDB, YugabyteDB and TiDB run the end-to-end suite in
+  CI. No new driver code, but two real fixes to the Postgres driver: a catalog
+  filter that returned zero tables on CockroachDB, and a double truncate inside
+  one transaction that YugabyteDB rejects outright.
+- **Written.** All seventeen remaining drivers exist and compile — the five
+  relational, ClickHouse, Trino, Redshift, Databricks, Snowflake, BigQuery, and
+  the six non-relational. None has been run against a live server, and the
+  README says so in those words.
+- **Build tags.** Four sets, in `cmd/seedora/drivers_*.go`, with the release
+  matrix behind them. Measured: default 21.0 MB, `enterprise` 37.7 MB, `nosql`
+  33.7 MB, `warehouse` 66.8 MB, `all` 109.4 MB — which is the 109 MB this
+  document predicted before any of it was written.
+
+Still open, and unchanged: the transaction contract needs surfacing in the UI
+rather than only in driver comments; the schemaless engines need a real schema
+source rather than the per-driver sampling each one now does; and staged bulk
+loading exists in the Snowflake and BigQuery drivers but has never been run.
+
 ## How these numbers were produced
 
 Two questions decide whether a driver is usable here, and both have exact

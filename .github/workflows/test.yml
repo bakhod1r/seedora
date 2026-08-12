@@ -83,6 +83,84 @@ jobs:
           go test -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -1
 
+  # CockroachDB, YugabyteDB, and TiDB speak a wire protocol Seedora already
+  # drives, so they need no driver code — only a server to prove the claim
+  # against. They are a separate job because they are started by hand rather
+  # than as services: each needs a command of its own, which `services` cannot
+  # give a container, and none of them should hold up the main suite.
+  wire-compatible:
+    name: postgres and mysql wire engines
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start CockroachDB
+        run: |
+          docker run -d --name crdb -p 26257:26257 \
+            cockroachdb/cockroach:v24.3.5 start-single-node --insecure
+
+      # yugabyted binds the YSQL proxy to 127.0.0.1 inside the container, which
+      # the published port cannot reach. The tserver flag is the only thing that
+      # moves it: --advertise_address does not.
+      - name: Start YugabyteDB
+        run: |
+          docker run -d --name yb -p 5433:5433 \
+            yugabytedb/yugabyte:2.25.1.0-b381 \
+            bin/yugabyted start --background=false \
+            --tserver_flags=pgsql_proxy_bind_address=0.0.0.0:5433
+
+      - name: Start TiDB
+        run: docker run -d --name tidb -p 4000:4000 -p 10080:10080 pingcap/tidb:v8.5.1
+
+      # Each engine is waited for with a query it has to answer, not with an
+      # open port: all three accept a connection well before they can serve one.
+      - name: Wait for the servers
+        run: |
+          set -e
+          for i in $(seq 60); do
+            docker exec crdb ./cockroach sql --insecure -e 'SELECT 1' >/dev/null 2>&1 && break
+            sleep 5
+            [ "$i" = 60 ] && { docker logs crdb; exit 1; }
+          done
+          # From the host, not `docker exec`: a probe run inside the container
+          # reaches YSQL on loopback and passes while the published port is
+          # still unreachable, which is exactly the failure this job exists to
+          # catch.
+          for i in $(seq 60); do
+            psql 'postgres://yugabyte:yugabyte@127.0.0.1:5433/yugabyte?sslmode=disable' \
+              -c 'SELECT 1' >/dev/null 2>&1 && break
+            sleep 5
+            [ "$i" = 60 ] && { docker logs yb; exit 1; }
+          done
+          for i in $(seq 60); do
+            curl -sf http://127.0.0.1:10080/status >/dev/null 2>&1 && break
+            sleep 5
+            [ "$i" = 60 ] && { docker logs tidb; exit 1; }
+          done
+
+      - name: Create the test databases
+        run: |
+          set -e
+          docker exec crdb ./cockroach sql --insecure -e 'CREATE DATABASE IF NOT EXISTS seedora_test'
+          psql 'postgres://yugabyte:yugabyte@127.0.0.1:5433/yugabyte?sslmode=disable' \
+            -c 'CREATE DATABASE seedora_test' || true
+
+      # An explicit timeout rather than Go's 10m default: the suite clears this
+      # in well under a minute, and Yugabyte has been seen to stall far past it
+      # with the server otherwise healthy.
+      - name: Test
+        run: go test -race -count=1 -timeout 20m ./tests/
+        env:
+          SEEDORA_TEST_COCKROACH: postgres://root@127.0.0.1:26257/seedora_test?sslmode=disable
+          SEEDORA_TEST_YUGABYTE: postgres://yugabyte:yugabyte@127.0.0.1:5433/seedora_test?sslmode=disable
+          SEEDORA_TEST_TIDB: mysql://root@127.0.0.1:4000/test
+
   # The page in a real Chromium. A separate job because it installs a browser
   # and a Python environment, neither of which the Go tests should wait on, and
   # neither of which is needed to build or ship Seedora.

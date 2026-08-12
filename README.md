@@ -20,17 +20,18 @@
 <p align="center">
   <img src="https://img.shields.io/github/v/release/bakhod1r/seedora?color=2f6f4e" alt="Release">
   <img src="https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.26+">
-  <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite-2f6f4e" alt="Databases">
+  <img src="https://img.shields.io/badge/engines-6%20tested%20%C2%B7%2017%20more%20written-2f6f4e" alt="Databases">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
 </p>
 
 ---
 
-> **Status: early.** PostgreSQL, SQLite, and MySQL/MariaDB work end to end —
+> **Status: early.** Six engines are tested end to end in CI — PostgreSQL,
+> MySQL/MariaDB, SQLite, CockroachDB, YugabyteDB and TiDB — covering
 > introspection, the mapping UI, `seedora.yaml`, and seeding at six figures of
-> rows. The other engines listed under
-> [Supported databases](#supported-databases) are designed for and not yet
-> written; the table says which is which.
+> rows. Seventeen more drivers are written and compile but have not been run
+> against a live server. [Supported databases](#supported-databases) says which
+> is which, and does not blur the two.
 
 ## Overview
 
@@ -276,31 +277,63 @@ Dropping non-essential indexes before a large run and rebuilding afterwards stil
 
 ## Supported databases
 
-Each driver implements the same interface — introspect, plan, bulk-insert — so a table mapping written for one engine transfers to another with only type-specific generators changing. Three engines are implemented, and the third is what proved the interface was drawn right rather than fitted to two.
+Each driver implements the same interface — introspect, plan, bulk-insert — so a table mapping written for one engine transfers to another with only type-specific generators changing.
 
-**Working**
+There are two claims below and they are not the same one. **Tested** means a container runs the end-to-end suite against that engine in CI on every push: introspect a real catalog, seed it, read the rows back, and check that the unique columns are unique and the foreign keys point at rows that exist. **Written** means the driver exists and compiles and nothing has run it against a live server.
+
+**Tested**
 
 | Engine | Versions | Bulk path |
 | --- | --- | --- |
 | PostgreSQL | 12+ | `COPY` |
 | MySQL / MariaDB | 8.0+ / 10.5+ | Prepared chunked multi-row `INSERT` |
 | SQLite | 3.35+ | Prepared chunked `INSERT` |
+| CockroachDB | 24.3 | `COPY`, via the Postgres driver |
+| YugabyteDB | 2.25 | `COPY`, via the Postgres driver |
+| TiDB | 8.5 | chunked `INSERT`, via the MySQL driver |
 
-The Postgres driver also accepts `cockroachdb://`, `yugabyte://`, and Aurora Postgres DSNs, since they speak the same wire protocol — but only Postgres itself has been tested.
+The last three have no driver of their own: they speak a wire protocol Seedora already drives. Getting them green took no new driver code but did take two fixes to the Postgres driver, which is the argument for testing rather than assuming. CockroachDB reports `relispartition` as NULL, and the catalog query filtered on `NOT c.relispartition` — `NOT NULL` is NULL, so introspection returned no tables at all. YugabyteDB cannot truncate the same relation twice inside one transaction, which Seedora did routinely whenever a plan covered both a parent and its child; truncates are now one batched statement.
+
+Aurora accepts the same DSNs and cannot be containerised, so it stays untested.
+
+One difference worth knowing: on CockroachDB `--truncate` does not reset sequences, because CockroachDB has no `RESTART IDENTITY`. The same `--seed` reproduces the same row contents there but not the same primary keys.
+
+**Written, not yet tested**
+
+| Family | Engines |
+| --- | --- |
+| Relational | SQL Server, Oracle, SAP HANA, Vertica, Firebird |
+| Analytical | ClickHouse, Trino, Redshift, Databricks |
+| Warehouse | Snowflake, BigQuery |
+| Non-relational | MongoDB, Elasticsearch, Cassandra / ScyllaDB, DynamoDB, Neo4j, Redis |
+
+Most of these have a container and will move up as CI gains one. Snowflake, BigQuery and Databricks need an account and cost money per run, so they cannot be CI-tested at all; they need a manual verification checklist instead, and they will keep saying "written" until somebody works through it.
 
 Two things about MySQL are worth knowing before you point Seedora at one. Schema changes made in the diagram cannot be rolled back: MySQL commits the open transaction before every DDL statement, so a batch that fails part way leaves the earlier statements applied, and the review dialog says so. And truncation is `DELETE` rather than `TRUNCATE`, because `TRUNCATE` is DDL there and would commit the transaction that a failed run is meant to unwind — so emptying a table that another table's rows still point at is refused, and the error names the constraint.
 
-**Designed, not yet written**
+### The transaction promise, and where it breaks
 
-Relational: SQL Server, Oracle, CockroachDB, Aurora, Cloud Spanner, YugabyteDB.
-Analytical: ClickHouse, DuckDB, Snowflake, BigQuery, Redshift.
-Non-relational: MongoDB, Redis, Cassandra/ScyllaDB, Elasticsearch/OpenSearch, Neo4j.
+A run is one transaction, and a failure leaves the database exactly as it was. Most engines honour that. Several cannot, and the drivers say so rather than pretending: ClickHouse, Trino, Databricks, Snowflake, BigQuery, Cassandra, Elasticsearch, DynamoDB and Redis all commit as they write. Their `Rollback` returns an error naming what is already permanent instead of returning nil as though it had undone something. Redshift can roll back and does.
 
-Schema inference will differ by family. Relational and analytical engines are introspected from the catalog, so mapping is automatic. Schemaless stores would be inferred by sampling existing documents, or defined from a JSON Schema or a document template; Neo4j maps to node labels and relationship types rather than tables.
+Schema inference differs by family too. Relational and analytical engines are introspected from the catalog, so mapping is automatic. Cassandra and Elasticsearch have a real typed schema and behave almost the same way. Neo4j and DynamoDB expose part of one. MongoDB has no catalog at all, so its driver infers columns by sampling documents — inference from data, not a declared schema. Redis has nothing to read, and says so rather than inventing a catalog.
 
-Adding an engine means implementing `db.Driver` and `db.Tx` in a package under `internal/db` and importing it from `cmd/seedora`. Nothing above the driver layer branches on which database it is pointed at.
+### Which engines your binary has
 
-[`docs/engines.md`](docs/engines.md) plans the rest of the list: which drivers are pure Go and what each costs the binary — both measured rather than assumed — and the two decisions that have to be made before the heavy ones land.
+Linking every driver into one executable produces a 109 MB download, most of it three cloud SDKs that arrive with gRPC, protobuf, and a generated API surface for the whole platform. So the engine set is chosen at build time.
+
+| Build | Size | Engines |
+| --- | ---: | --- |
+| default | 21.0 MB | PostgreSQL, MySQL, SQLite, SQL Server, ClickHouse |
+| `-tags enterprise` | 37.7 MB | adds Oracle, SAP HANA, Vertica, Firebird, Trino |
+| `-tags nosql` | 33.7 MB | adds MongoDB, Redis, Cassandra, Elasticsearch, Neo4j, DynamoDB |
+| `-tags warehouse` | 66.8 MB | adds Snowflake, BigQuery, Redshift, Databricks |
+| `-tags all` | 109.4 MB | everything |
+
+Releases ship the default build for all five targets, and the tagged builds for linux/amd64 and darwin/arm64. Sizes are `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w"` on darwin/arm64, measured rather than estimated.
+
+Adding an engine means implementing `db.Driver` and `db.Tx` in a package under `internal/db` and importing it from the right `cmd/seedora/drivers_*.go`. Nothing above the driver layer branches on which database it is pointed at.
+
+[`docs/engines.md`](docs/engines.md) has the per-driver byte costs and the reasoning behind the tag sets.
 
 ## Safety
 

@@ -20,7 +20,7 @@ func TestMySQLSmoke(t *testing.T) {
 	// The schema this test builds on is created here rather than assumed: a
 	// test that depends on another test having run is a test that passes on a
 	// laptop and fails in CI.
-	d := openMySQL(t, dsn).driver
+	d := openMySQL(t, "mysql", "SEEDORA_TEST_MYSQL", dsn).driver
 	t.Log("engine", d.Name(), "dialect", d.Dialect())
 
 	dropInvoices := func() {
