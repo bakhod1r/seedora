@@ -1849,6 +1849,54 @@ dialog::backdrop {
   16%, 78% { opacity: 1; }
 }
 
+/* The two popovers arrive from their anchor rather than appearing on top of
+   it, which is what makes the arrow on a column row read as the thing that
+   opened the panel. */
+[popover]:popover-open {
+  animation: pop-in var(--fast) var(--ease-out);
+  transform-origin: top left;
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.94) translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* The row a click just selected takes the accent from its left edge. One
+   sweep: the row stays marked afterwards, and the motion only says which one
+   it is. */
+.col.selected { animation: row-mark var(--travel) var(--ease-out); }
+@keyframes row-mark {
+  from { box-shadow: inset 0 0 0 var(--accent); background: transparent; }
+  to { box-shadow: inset 2px 0 0 var(--accent); background: var(--accent-soft); }
+}
+
+/* A column added in edit mode arrives; the ones already there do not, because
+   the diagram is rebuilt on every keystroke and everything would arrive on
+   each one. The script marks the row it just made. */
+.col-edit.entering { animation: row-in var(--travel) var(--ease-out) both; }
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* The flags and the two small round controls take the press, like the buttons
+   above them. */
+.flag, .col-ref, .col-drop {
+  transition: background var(--fast) var(--ease-out), border-color var(--fast) var(--ease-out),
+    color var(--fast) var(--ease-out), transform var(--fast) var(--ease-out);
+}
+.flag:active, .col-ref:active, .col-drop:active { transform: scale(0.92); }
+
+/* Undo and redo becoming available is worth a glance: the stack is invisible
+   otherwise, and the first edit of a session is when a person learns the
+   buttons are there at all. */
+.btn.armed { animation: arm 420ms var(--ease-spring); }
+@keyframes arm {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.09); }
+  100% { transform: scale(1); }
+}
+
 /* One switch for everything above. Motion is a preference the operating system
    already carries, and a tool that ignores it is not premium. */
 @media (prefers-reduced-motion: reduce) {
@@ -1861,11 +1909,18 @@ dialog::backdrop {
   .ctx-menu,
   .toast,
   .edge.flow,
-  .edge-comet {
+  .edge-comet,
+  [popover]:popover-open,
+  .col.selected,
+  .col-edit.entering,
+  .btn.armed {
     animation: none;
   }
   .diagram.zooming { transition: none; }
-  .btn:active { transform: none; }
+  .btn:active,
+  .flag:active,
+  .col-ref:active,
+  .col-drop:active { transform: none; }
 }
 
 /* ==========================================================================

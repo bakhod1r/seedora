@@ -555,3 +555,34 @@ def test_the_reference_is_edited_in_a_popover(page):
     assert page.locator(f"section.table[data-table='{name}'] .col-ref.on").count() == 1, \
         "the control does not show that this column now references something"
     assert page.errors == [], f"console errors: {page.errors}"
+
+
+def test_only_the_new_column_row_animates_in(page):
+    """The diagram is rebuilt on every keystroke. An entrance tied to the render
+    would replay on every letter typed into any field on the card."""
+    name = page.locator("section.table").first.get_attribute("data-table")
+    page.evaluate("(n) => { app.editing.add(n); renderDiagram(); }", name)
+    page.wait_for_timeout(300)
+
+    add = page.locator(f"section.table[data-table='{name}'] .table-foot button", has_text="+ column")
+    add.click()
+    add.click()
+    page.wait_for_timeout(300)
+
+    entering = page.locator(f"section.table[data-table='{name}'] .col-edit.entering")
+    assert entering.count() == 1, f"{entering.count()} rows animating, expected the newest one"
+
+    # Any other render — typing, toggling a flag — must not bring them all back.
+    page.evaluate("() => renderDiagram()")
+    page.wait_for_timeout(300)
+    assert page.locator(f"section.table[data-table='{name}'] .col-edit.entering").count() == 0, \
+        "the entrance replayed on a rebuild"
+
+
+def test_undo_is_marked_when_it_becomes_usable(page):
+    """Nothing else on the page says a history exists."""
+    rows = page.locator("section.table input[type='number']").first
+    rows.fill("4242")
+    rows.dispatch_event("change")
+    page.wait_for_selector("#btn-undo.armed", timeout=3000)
+    assert page.errors == [], f"console errors: {page.errors}"

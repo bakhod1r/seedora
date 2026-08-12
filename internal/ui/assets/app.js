@@ -472,6 +472,16 @@ function redoLabel() {
   return canRedo() ? history.future[history.future.length - 1].label : null;
 }
 
+// arm marks a button that has just become usable. The history is invisible
+// until it has something in it, and the first edit of a session is when a
+// person finds out these two are there at all.
+function arm(button, usable) {
+  if (!usable || !button.disabled) return;
+  button.classList.add("armed");
+  button.addEventListener("animationend", () => button.classList.remove("armed"),
+    { once: true });
+}
+
 // updateHistoryButtons reflects the stack in the toolbar. Defined here because
 // pushPlan calls it; the buttons themselves arrive with the bindings.
 function updateHistoryButtons() {
@@ -479,6 +489,8 @@ function updateHistoryButtons() {
   const redoBtn = $("btn-redo");
   if (!undoBtn || !redoBtn) return;
 
+  arm(undoBtn, canUndo());
+  arm(redoBtn, canRedo());
   undoBtn.disabled = !canUndo();
   redoBtn.disabled = !canRedo();
   undoBtn.title = canUndo() ? `Undo ${undoLabel()}` : "Nothing to undo";
@@ -647,10 +659,9 @@ function tableCard(t, tp) {
   if (editing) {
     const add = el("button", "btn btn-quiet", "+ column");
     add.addEventListener("click", () => {
-      app.pending.push({
-        kind: "add_column", table: t.name,
-        columns: [{ name: "", type: defaultType(), nullable: true }],
-      });
+      const col = { name: "", type: defaultType(), nullable: true };
+      app.pending.push({ kind: "add_column", table: t.name, columns: [col] });
+      freshColumn = col;
       renderDiagram();
     });
     foot.appendChild(add);
@@ -3747,7 +3758,9 @@ function draftCard(d) {
   const foot = el("div", "table-foot");
   const add = el("button", "btn btn-quiet", "+ column");
   add.addEventListener("click", () => {
-    d.columns.push({ name: "", type: defaultType(), nullable: true });
+    const col = { name: "", type: defaultType(), nullable: true };
+    d.columns.push(col);
+    freshColumn = col;
     renderDiagram();
   });
   foot.appendChild(add);
@@ -3769,8 +3782,15 @@ function draftCard(d) {
 // columnEditor is one editable column, used both for a draft table's columns
 // and for a column being added to an existing one. They are the same thing at
 // this point: a name, a type, and the three flags that change what it means.
+// freshColumn is the column the last "+ column" made. The diagram is rebuilt
+// on every keystroke, so the entrance is tied to the object rather than to the
+// render: without that, every editable row would arrive again on each letter
+// typed into any of them.
+let freshColumn = null;
+
 function columnEditor(col, onRemove) {
-  const row = el("div", "col col-edit");
+  const row = el("div", "col col-edit" + (col === freshColumn ? " entering" : ""));
+  if (col === freshColumn) freshColumn = null;
 
   const name = el("input", "col-edit-name");
   name.value = col.name;
