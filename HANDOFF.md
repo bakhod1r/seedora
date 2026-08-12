@@ -133,49 +133,45 @@ is what the wire protocol expects.
   they are applied in a transaction after a SQL review, and undoing an applied
   `DROP TABLE` would mean inventing a table this tool never saw.
 
-## Undo shipped with seven known defects
+## Undo: seven defects found after merge, all fixed
 
-A whole-branch review of the undo work recommended against merging it. It was
-merged anyway, deliberately, so these are open and this is the list. Two of
-them lose a user's work in ordinary use.
+A whole-branch review of the undo work recommended against merging it and
+listed seven defects. It was merged anyway, deliberately, and the seven were
+then fixed on main. Recorded here because the fixes are the design, not just
+patches.
 
-- **`history.base` goes stale whenever the plan changes outside `pushPlan`,
-  `undo`, or `redo`.** `applyState` replaces `app.plan` and does not touch
-  `base`. Import, schema apply, the post-run state refresh, and `importSchema`
-  all take that path, and none of them changes `s.target`, so the reconnect
-  check does not fire either. Edit, then import a `seedora.yaml`, then change
-  one generator: a single undo throws the imported mapping away, and Save
-  writes that to disk. The fix is to make `applyState` the one place that
-  maintains `base`, and to `resetHistory()` on a successful import or schema
-  apply — those snapshots are no longer edits of the current plan.
-- **Nothing serialises in-flight plan requests.** Holding Cmd-Z autorepeats, so
-  a second `undo` starts while the first is still in flight: `future` gets two
-  entries holding the same plan, a redo step is lost, and two PUTs race a
-  last-write-wins server. Two fast edits have the same shape. A flag or a
-  promise chain over the three functions closes it.
-- **The commonest undo label is the string "undefined".** `commit()` builds it
-  from `cur.column`, and `current()` returns `{t, c, cp}` — no such property.
-  Every generator change toasts "Undid undefined settings". It should be
-  `cur.c.name`.
-- **The failure path aliases rather than clones.** `undo` and `redo` both do
-  `app.plan = current` in their catch blocks, where `current` is the `base`
-  object itself, so later in-place edits mutate the snapshot and the next undo
-  becomes a no-op. `structuredClone`.
-- **Undo is live during a seeding run.** `setRunningUI` disables the controls
-  that would disturb a run and was not told about the two new buttons. The run
-  is safe — the Go side captured the plan before starting — but `renderDiagram`
-  destroys every progress bar mid-stream.
-- **A schema apply leaves the history intact.** Undoing across an applied
-  `DROP TABLE` PUTs a plan naming a table that no longer exists, which
-  `plan.Validate` refuses. Same fix as the first item.
-- **The keystroke comment says the opposite of the code.** It claims the
-  shortcut works while a field has focus; the guard is `!inField`, so it works
-  in no field at all. The behaviour is the intended one — the browser's own
-  undo is what a person typing means — and the comment is simply wrong.
+- **`history.base` is maintained by `applyState`, not by `pushPlan`.** Every
+  path that replaces the plan — an edit, an undo, an import, a schema apply,
+  the refresh after a run — comes through `applyState`, so that is the one
+  place that snapshots. Previously `base` went stale on any of the non-edit
+  paths, and a single undo after an import threw the imported mapping away and
+  Save wrote that to disk.
+- **`resetHistory()` on a successful import and on a schema apply.** Those are
+  new plans, not edits of the old one, and after a `DROP TABLE` a stored plan
+  names a table `plan.Validate` will refuse.
+- **`serialize()` chains every plan commit.** `pushPlan`, `undo`, and `redo`
+  each read the stack, await a PUT, and write the stack back; overlapped — an
+  autorepeating ⌘Z — two undos read the same base and raced two PUTs at a
+  last-write-wins server.
+- **A commit that changes nothing is not recorded.** A `change` event can fire
+  on an untouched field, and the entry it left cost a keystroke that appeared
+  to do nothing. This one surfaced only once serialization stopped the race
+  from hiding it.
+- **The failure path clones.** `undo` and `redo` used to assign the `base`
+  object itself to `app.plan` in their catch blocks, so the next in-place edit
+  rewrote the snapshot the next undo was to restore.
+- **`setRunningUI` disables undo and redo.** The run itself was always safe —
+  the server takes its copy of the plan before starting — but a re-render
+  destroys the progress bars mid-stream.
+- **The label reads `cur.c.name`.** `current()` returns `{t, c, cp}`, so the
+  old `cur.column` toasted "Undid undefined settings" on every generator
+  change.
+- **The keystroke comment now matches the guard.** ⌘Z is ignored inside a
+  field, where the browser's own undo is what the person means.
 
-None of these is caught by a test, which is its own finding: both suites are
-strictly awaited, so no test can see the concurrency, and every test supplies
-its own label, so none sees the "undefined".
+Four of these are covered by new tests in `tests/ui/undo.test.mjs` — the stale
+base, the race, the aliased snapshot, and the no-op commit — each verified to
+fail against the code as merged.
 
 ## Bugs found and fixed
 

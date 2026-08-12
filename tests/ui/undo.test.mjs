@@ -186,3 +186,90 @@ test("a rejected undo leaves the stack where it was", async () => {
     "the undo failed, so the edit is still there to be undone");
   assert.equal(app.canRedo(), false);
 });
+
+// The plan can also be replaced from outside the stack — an import, a schema
+// apply, the state refresh after a run all arrive as a whole new plan. Those
+// paths go through applyState, so applyState is what has to keep base honest.
+
+test("a plan that arrives outside an edit is not undone away", async () => {
+  const { app, state, sent } = withServer();
+
+  state.plan.tables.users.rows = 500;
+  await app.pushPlan("row count");
+
+  // An import: a different plan, same database, no edit of ours involved.
+  app.applyState({
+    connected: true,
+    plan: { tables: { users: { rows: 500, columns: {} }, orders: { rows: 7, columns: {} } } },
+    schema: { tables: [] },
+  });
+
+  state.plan.tables.users.rows = 600;
+  await app.pushPlan("row count again");
+  await app.undo();
+
+  const back = sent[sent.length - 1].plan;
+  assert.ok(back.tables.orders,
+    "the undo pushed a plan from before the import, discarding what it brought in");
+  assert.equal(back.tables.users.rows, 500);
+});
+
+test("concurrent undos do not race", async () => {
+  const { app, state } = withServer();
+  const echo = app.api;
+  // A server that takes a moment, which is what lets two undos overlap.
+  app.api = async (m, p, b) => {
+    await new Promise((r) => setTimeout(r, 5));
+    return echo(m, p, b);
+  };
+
+  for (const n of [200, 300]) {
+    state.plan.tables.users.rows = n;
+    await app.pushPlan(`set ${n}`);
+  }
+
+  // Both fired before either resolves — an autorepeating ⌘Z.
+  await Promise.all([app.undo(), app.undo()]);
+
+  const history = reader(app)("history");
+  assert.equal(history.past.length, 0);
+  assert.equal(history.future.length, 2);
+  assert.deepEqual(
+    Array.from(history.future, (e) => e.plan.tables.users.rows).sort((a, b) => a - b),
+    [200, 300],
+    "the two undos read the same base, so a redo step points at the wrong plan");
+  assert.equal(state.plan.tables.users.rows, 100);
+});
+
+test("a rejected undo leaves a snapshot later edits cannot reach into", async () => {
+  const { app, state } = withServer();
+
+  state.plan.tables.users.rows = 500;
+  await app.pushPlan("row count");
+
+  app.api = async () => { throw new Error("the server said no"); };
+  await app.undo();
+
+  // The edit that follows a failed undo mutates the plan in place, as every
+  // edit in the page does. It must not reach into the stack's own copy.
+  state.plan.tables.users.rows = 777;
+
+  const history = reader(app)("history");
+  assert.equal(history.base.tables.users.rows, 500,
+    "the failed undo handed the plan the base object itself, and an in-place " +
+    "edit has now rewritten the snapshot the next undo restores");
+});
+
+test("a commit that changed nothing is not undoable", async () => {
+  const { app, state } = withServer();
+
+  state.plan.tables.users.rows = 500;
+  await app.pushPlan("row count");
+  // A `change` event on a field nobody edited: the plan is already what the
+  // server holds.
+  await app.pushPlan("row count");
+
+  const history = reader(app)("history");
+  assert.equal(history.past.length, 1,
+    "a no-op commit took a slot on the stack, so one undo appears to do nothing");
+});

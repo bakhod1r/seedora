@@ -262,6 +262,13 @@ function applyState(s) {
     resetHistory();
   }
 
+  // Every path that replaces the plan comes through here — an edit, an undo, an
+  // import, a schema apply, the refresh after a run. So this is the one place
+  // that keeps base in step with what the server now holds. Left to pushPlan
+  // alone, an import would leave base describing the plan from before it, and
+  // the next undo would push that stale plan back and throw the import away.
+  history.base = snapshotPlan();
+
   $("target").hidden = !s.connected;
   if (s.connected) {
     $("target-engine").textContent = s.engine;
@@ -302,18 +309,23 @@ function renderProblems(problems) {
 // say. Saving without one — before a run, say — is not an edit and does not
 // belong in the history.
 async function pushPlan(label) {
-  const before = history.base;
-  try {
-    applyState(await api("PUT", "/api/plan", app.plan));
-  } catch (e) {
-    toast(e.message, "bad");
-    return;
-  }
-  // Recorded only after the server has taken it. An edit it refused never
-  // happened, and offering to undo it would be offering to undo nothing.
-  if (label) recordEdit(label, before);
-  history.base = snapshotPlan();
-  updateHistoryButtons();
+  return serialize(async () => {
+    const before = history.base;
+    try {
+      applyState(await api("PUT", "/api/plan", app.plan));
+    } catch (e) {
+      toast(e.message, "bad");
+      return;
+    }
+    // Recorded only after the server has taken it. An edit it refused never
+    // happened, and offering to undo it would be offering to undo nothing.
+    //
+    // An edit that changed nothing is skipped for the same reason. A `change`
+    // event can fire on a field whose value was not touched, and a stack entry
+    // for it costs a keystroke that appears to do nothing at all.
+    if (label && changed(before, history.base)) recordEdit(label, before);
+    updateHistoryButtons();
+  });
 }
 
 // undo puts the plan back the way it was before the last recorded edit.
@@ -323,48 +335,55 @@ async function pushPlan(label) {
 // save. That also means an undo can fail, and a failed undo has to leave the
 // stack exactly as it found it.
 async function undo() {
-  if (!canUndo()) return;
-  const entry = history.past.pop();
-  const current = history.base;
+  return serialize(async () => {
+    if (!canUndo()) return;
+    const entry = history.past.pop();
+    const current = history.base;
 
-  app.plan = structuredClone(entry.plan);
-  try {
-    applyState(await api("PUT", "/api/plan", app.plan));
-  } catch (e) {
-    history.past.push(entry);
-    app.plan = current;
-    toast(e.message, "bad");
-    return;
-  }
+    app.plan = structuredClone(entry.plan);
+    try {
+      applyState(await api("PUT", "/api/plan", app.plan));
+    } catch (e) {
+      history.past.push(entry);
+      // A clone, not the object itself: base is handed out by reference, and
+      // the in-place edits that follow would otherwise mutate the snapshot the
+      // next undo is supposed to restore.
+      app.plan = structuredClone(current);
+      history.base = structuredClone(current);
+      toast(e.message, "bad");
+      return;
+    }
 
-  history.future.push({ label: entry.label, plan: current });
-  history.base = snapshotPlan();
-  renderDiagram();
-  updateHistoryButtons();
-  toast(`Undid ${entry.label}`, "good");
+    history.future.push({ label: entry.label, plan: current });
+    renderDiagram();
+    updateHistoryButtons();
+    toast(`Undid ${entry.label}`, "good");
+  });
 }
 
 // redo reapplies what undo took away.
 async function redo() {
-  if (!canRedo()) return;
-  const entry = history.future.pop();
-  const current = history.base;
+  return serialize(async () => {
+    if (!canRedo()) return;
+    const entry = history.future.pop();
+    const current = history.base;
 
-  app.plan = structuredClone(entry.plan);
-  try {
-    applyState(await api("PUT", "/api/plan", app.plan));
-  } catch (e) {
-    history.future.push(entry);
-    app.plan = current;
-    toast(e.message, "bad");
-    return;
-  }
+    app.plan = structuredClone(entry.plan);
+    try {
+      applyState(await api("PUT", "/api/plan", app.plan));
+    } catch (e) {
+      history.future.push(entry);
+      app.plan = structuredClone(current);
+      history.base = structuredClone(current);
+      toast(e.message, "bad");
+      return;
+    }
 
-  history.past.push({ label: entry.label, plan: current });
-  history.base = snapshotPlan();
-  renderDiagram();
-  updateHistoryButtons();
-  toast(`Redid ${entry.label}`, "good");
+    history.past.push({ label: entry.label, plan: current });
+    renderDiagram();
+    updateHistoryButtons();
+    toast(`Redid ${entry.label}`, "good");
+  });
 }
 
 // ---- undo
@@ -399,6 +418,28 @@ const history = {
 
 function snapshotPlan() {
   return app.plan ? structuredClone(app.plan) : null;
+}
+
+// changed compares two plans. Key order is stable: every plan the page holds
+// came from the server's JSON or from structuredClone of one that did.
+function changed(a, b) {
+  return JSON.stringify(a) !== JSON.stringify(b);
+}
+
+// serialize runs plan commits one at a time.
+//
+// Holding ⌘Z autorepeats, and every one of these functions reads the stack,
+// awaits a PUT, and then writes the stack back. Overlapped, two undos read the
+// same base, push the same plan onto future twice, and race two PUTs against a
+// server that keeps whichever lands last. Chaining them makes each one see the
+// state the one before it left.
+let planQueue = Promise.resolve();
+
+function serialize(fn) {
+  const next = planQueue.then(fn, fn);
+  // The chain must not stay rejected, or every later commit would be skipped.
+  planQueue = next.catch(() => {});
+  return next;
 }
 
 // resetHistory starts over. Connecting to another database makes every stored
@@ -3213,7 +3254,7 @@ const num = (v) => (v === "" ? undefined : isNaN(Number(v)) ? v : Number(v));
 function commit() {
   const cur = current();
   if (cur) cur.cp.confidence = "manual";
-  pushPlan(cur ? `${cur.column} settings` : "column settings");
+  pushPlan(cur ? `${cur.c.name} settings` : "column settings");
 }
 
 $("opt-unique").addEventListener("change", (e) => {
@@ -3827,6 +3868,10 @@ bind("schema-apply", "click", async () => {
     app.editing.clear();
     schemaDialog.close();
     applyState(st);
+    // The database itself changed. A stored plan may name a table an applied
+    // DROP has just removed, and pushing it back would fail plan.Validate.
+    resetHistory();
+    updateHistoryButtons();
     toast("Schema updated", "good");
   } catch (e) {
     showSchemaError(e.message, e.problems);
@@ -4216,7 +4261,13 @@ function setRunningUI(on, dry) {
   const go = $("btn-seed");
   go.disabled = on;
   go.textContent = on ? (dry ? "Validating…" : "Seeding…") : "Seed…";
-  for (const id of ["btn-import", "btn-save"]) $(id).disabled = on;
+  // Undo and redo re-render the diagram, which destroys the progress bars a run
+  // is drawing into. The run itself is safe — the server took its copy of the
+  // plan before it started — but the display is not.
+  for (const id of ["btn-import", "btn-save", "btn-undo", "btn-redo"]) {
+    $(id).disabled = on;
+  }
+  if (!on) updateHistoryButtons();
   $("board").classList.toggle("running", on);
   if (!on) clearTableProgress();
 }
@@ -4309,6 +4360,11 @@ $("btn-do-import").addEventListener("click", async () => {
         yaml: text,
         replace: $("import-replace").checked,
       }));
+      // An import is a new plan, not an edit of the old one. Undoing across it
+      // would silently discard everything it brought in, so the stack starts
+      // over at what was just imported.
+      resetHistory();
+      updateHistoryButtons();
       importDialog.close();
       $("import-text").value = "";
       toast("Mapping imported", "good");
@@ -4550,9 +4606,9 @@ document.addEventListener("keydown", (e) => {
   }
 
   // Undo is the one shortcut that keeps its modifier, because it is the one
-  // people arrive already knowing. It also works while a field has focus,
-  // where a bare letter would be a character someone was typing — but not in a
-  // text field, where the browser's own undo is the one they mean.
+  // people arrive already knowing. It stays out of fields: inside one, ⌘Z
+  // means the browser's own undo of what is being typed, which is what the
+  // person pressing it means.
   const mod = e.metaKey || e.ctrlKey;
   if (mod && e.key.toLowerCase() === "z" && !inField) {
     e.preventDefault();
