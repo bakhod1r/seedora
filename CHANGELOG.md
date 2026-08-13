@@ -10,6 +10,58 @@ it.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-13
+
+### Added
+
+- **Three more engines tested, and seventeen more written.** CockroachDB,
+  YugabyteDB and TiDB now run the end-to-end suite in CI alongside PostgreSQL,
+  MySQL and SQLite: introspect a real catalog, seed it, read the rows back,
+  check that unique columns are unique and foreign keys point at rows that
+  exist. They needed no driver code of their own — they speak a wire protocol
+  Seedora already drives — but they did need two fixes to the Postgres driver,
+  which is the argument for testing rather than assuming. Seventeen further
+  drivers are written and compile but have not been run against a live server:
+  SQL Server, Oracle, SAP HANA, Vertica and Firebird; ClickHouse, Trino,
+  Redshift and Databricks; Snowflake and BigQuery; and MongoDB, Elasticsearch,
+  Cassandra, DynamoDB, Neo4j and Redis. The README separates the two claims and
+  does not blur them into "supported".
+- **Build tags, because one binary cannot hold every driver.** Linking all of
+  them produces a 109.4 MB download, most of it three cloud SDKs arriving with
+  gRPC, protobuf and a generated API surface for a whole platform. The engine
+  set is now chosen at build time: default 21.0 MB (PostgreSQL, MySQL, SQLite,
+  SQL Server, ClickHouse), `-tags enterprise` 37.7 MB, `-tags nosql` 33.7 MB,
+  `-tags warehouse` 66.8 MB, `-tags all` 109.4 MB. Releases ship the default
+  build for all five targets and the tagged builds for linux/amd64 and
+  darwin/arm64. Sizes are measured, not estimated.
+- **An honest transaction contract for engines that cannot honour it.**
+  ClickHouse, Trino, Databricks, Snowflake, BigQuery, Cassandra, Elasticsearch,
+  DynamoDB and Redis commit as they write. Their `Rollback` returns an error
+  naming exactly what is already permanent rather than returning nil as though
+  it had undone something, and each driver documents at the point of use what a
+  mid-run failure leaves behind. Snowflake and BigQuery open no transaction at
+  all, since one covering half a run is worse than none. Redshift can roll back
+  and does.
+
+### Fixed
+
+- **Introspection returned no tables on CockroachDB.** The column query
+  filtered on `NOT c.relispartition`, and CockroachDB reports that column as
+  NULL — `NOT NULL` is NULL, so every table was dropped from the result and
+  seeding failed on an empty schema.
+- **Truncation failed on YugabyteDB whenever a plan covered a parent and its
+  child.** Yugabyte cannot truncate the same relation twice inside one
+  transaction, and Seedora truncated the child in its own right and then again
+  through its parent's `CASCADE`. Truncates are now a single batched statement,
+  which is also one round trip instead of several on every engine.
+
+### Removed
+
+- **DuckDB is dropped rather than deferred.** Its Go driver bundles a C++
+  library across 25 cgo files, so linking it means `CGO_ENABLED=1` and a
+  cross-compiler for each release target. The single binary is worth more, and
+  saying no is better than leaving it on a roadmap as though it were coming.
+
 ## [0.4.0] — 2026-08-12
 
 ### Added
@@ -281,7 +333,8 @@ First public version.
   handling, and a fixed `--seed` for reproducible runs.
 - The production-target guard.
 
-[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.5.0
 [0.4.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.4.0
 [0.3.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.3.0
 [0.2.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.2.0
