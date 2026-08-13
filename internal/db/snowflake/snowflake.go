@@ -713,7 +713,7 @@ func (t *Tx) Rollback(context.Context) error {
 	if len(t.applied) == 0 {
 		return nil
 	}
-	return fmt.Errorf("Snowflake cannot roll this run back — it commits as it loads, "+
+	return fmt.Errorf("this run cannot be rolled back: Snowflake commits as it loads, "+
 		"and the following is already permanent: %s. Re-run the seed to replace it, "+
 		"or recover the previous contents with Time Travel (SELECT … AT(OFFSET => …)) "+
 		"while the retention period lasts", strings.Join(t.applied, "; "))

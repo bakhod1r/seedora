@@ -433,8 +433,9 @@ func (t *Tx) Rollback(context.Context) error {
 	if len(t.truncated) > 0 {
 		what = append(what, fmt.Sprintf("%s was emptied", strings.Join(t.truncated, ", ")))
 	}
-	return fmt.Errorf("Trino cannot roll back: %s, and this failure does not undo it — "+
-		"the catalog is not in the state it was before the run", strings.Join(what, " and "))
+	return fmt.Errorf("this run cannot be rolled back: Trino commits as it writes. "+
+		"Already permanent: %s. The catalog is not in the state it was before the run",
+		strings.Join(what, " and "))
 }
 
 // literal renders one generated value as Trino SQL.

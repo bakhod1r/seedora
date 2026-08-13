@@ -32,6 +32,7 @@ import (
 	"io"
 	"iter"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -121,9 +122,48 @@ func parseDSN(dsn string) (project, dataset string, opts []option.ClientOption, 
 
 	q := u.Query()
 	if f := q.Get("credentials"); f != "" {
-		opts = append(opts, option.WithCredentialsFile(f))
+		if err := checkServiceAccountKey(f); err != nil {
+			return "", "", nil, "", err
+		}
+		opts = append(opts, option.WithAuthCredentialsFile(option.ServiceAccount, f))
 	}
 	return project, dataset, opts, q.Get("location"), nil
+}
+
+// checkServiceAccountKey refuses a credentials file that is anything other than
+// a service account key.
+//
+// The check is here rather than left to the library because neither option does
+// it. WithCredentialsFile is deprecated precisely for accepting any credential
+// configuration, and WithAuthCredentialsFile — which names a type and looks like
+// the fix — does not enforce the name: setting it switches the client onto the
+// new auth library, whose detection path drops the type and reads the file
+// without checking it.
+//
+// What that admits is an external_account configuration, which names the host
+// it fetches a token from. A DSN is the kind of string that gets pasted out of
+// a wiki or a ticket, so a credentials file it points at is exactly the input
+// that should not be allowed to choose where a token comes from.
+func checkServiceAccountKey(path string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read the credentials file named by the DSN: %w", err)
+	}
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(b, &probe); err != nil {
+		return fmt.Errorf("the credentials file named by the DSN is not JSON: %w", err)
+	}
+	if probe.Type != "service_account" {
+		return fmt.Errorf(
+			"the credentials file named by the DSN is of type %q; Seedora accepts only "+
+				"a service account key here, because the other kinds can name the host "+
+				"a token is fetched from. Use application default credentials instead "+
+				"(unset the credentials parameter and run gcloud auth application-default login)",
+			probe.Type)
+	}
+	return nil
 }
 
 // Name implements db.Driver.
@@ -736,8 +776,8 @@ func (t *Tx) Rollback(context.Context) error {
 	if len(t.applied) == 0 {
 		return nil
 	}
-	return fmt.Errorf("BigQuery cannot roll this run back — each load and each statement "+
-		"commits on its own, and the following is already permanent: %s. Re-run the seed "+
+	return fmt.Errorf("this run cannot be rolled back: in BigQuery each load and each "+
+		"statement commits on its own. Already permanent: %s. Re-run the seed "+
 		"to replace it, or read the table as it was with FOR SYSTEM_TIME AS OF while the "+
 		"time travel window lasts", strings.Join(t.applied, "; "))
 }

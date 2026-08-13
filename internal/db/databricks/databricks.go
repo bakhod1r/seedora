@@ -516,8 +516,8 @@ func (t *Tx) Rollback(context.Context) error {
 	if len(t.truncated) > 0 {
 		what = append(what, fmt.Sprintf("%s was emptied", strings.Join(t.truncated, ", ")))
 	}
-	return fmt.Errorf("Databricks cannot roll back: %s, and this failure does not undo it — "+
-		"restore the table from the Delta version before the run "+
+	return fmt.Errorf("this run cannot be rolled back: Databricks commits as it writes. "+
+		"Already permanent: %s. Restore the table from the Delta version before the run "+
 		"(RESTORE TABLE … TO VERSION AS OF) if you need it back", strings.Join(what, " and "))
 }
 

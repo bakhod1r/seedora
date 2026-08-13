@@ -438,8 +438,9 @@ func (t *Tx) Rollback(context.Context) error {
 	if len(t.truncated) > 0 {
 		what = append(what, fmt.Sprintf("%s was emptied", strings.Join(t.truncated, ", ")))
 	}
-	return fmt.Errorf("ClickHouse cannot roll back: %s, and this failure does not undo it — "+
-		"the database is not in the state it was before the run", strings.Join(what, " and "))
+	return fmt.Errorf("this run cannot be rolled back: ClickHouse commits as it writes. "+
+		"Already permanent: %s. The database is not in the state it was before the run",
+		strings.Join(what, " and "))
 }
 
 // value adapts the few generated types the batch protocol will not take as they

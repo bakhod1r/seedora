@@ -85,7 +85,7 @@ type TableResult struct {
 }
 
 // Run executes the plan. The caller owns the driver; Run owns the transaction.
-func Run(ctx context.Context, d db.Driver, s *model.Schema, p *plan.Plan, opts Options) (*Result, error) {
+func Run(ctx context.Context, d db.Driver, s *model.Schema, p *plan.Plan, opts Options) (_ *Result, err error) {
 	if errs := p.Validate(s); len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
@@ -116,7 +116,19 @@ func Run(ctx context.Context, d db.Driver, s *model.Schema, p *plan.Plan, opts O
 	}
 	// Unconditional: Commit marks the transaction done, so this is a no-op on
 	// the success path and the only thing that runs on every failure path.
-	defer func() { _ = tx.Rollback(ctx) }()
+	//
+	// Its error is joined onto the failure rather than discarded. On an engine
+	// that commits as it writes — ClickHouse, Snowflake, BigQuery and the rest —
+	// Rollback undoes nothing and says so, naming what is already permanent.
+	// That sentence is the whole point of not faking a transaction, and it is
+	// worth nothing if the only caller drops it. Only a failing run is
+	// augmented: after a successful Commit the transaction is done and this
+	// returns nil.
+	defer func() {
+		if rerr := tx.Rollback(ctx); rerr != nil && err != nil {
+			err = fmt.Errorf("%w\n%w", err, rerr)
+		}
+	}()
 
 	r := &Result{Seed: seedVal, DryRun: opts.DryRun}
 
