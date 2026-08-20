@@ -45,6 +45,20 @@ type Options struct {
 	// truncate — and every unique column is read back first so the rows this
 	// run generates are unique against the ones already there.
 	Append bool
+	// AppendUniqueCap is how many existing values --append will hold in memory
+	// per unique text column. Zero takes the default. It is a memory limit, so
+	// raising it is the caller's call to make on a machine with the headroom.
+	AppendUniqueCap int
+	// TxPerTable commits after each table instead of wrapping the whole run in
+	// one transaction.
+	//
+	// The single transaction is the right default: a failure anywhere leaves
+	// the database as it was. It stops being right at scale — a hundred million
+	// rows in one transaction grows the WAL without bound, holds off autovacuum
+	// for the duration, and turns a failure in the last table into a rollback
+	// of everything that came before it. This trades that atomicity for a run
+	// that can be resumed with --append.
+	TxPerTable bool
 	// DryRun generates and validates everything but writes nothing.
 	DryRun bool
 	// Progress is called as rows go past. It may be nil, and it is called from
@@ -154,6 +168,14 @@ func Run(ctx context.Context, d db.Driver, s *model.Schema, p *plan.Plan, opts O
 	// parent referenced by five children costs one query, not five.
 	keys := map[string][]any{}
 
+	if opts.TxPerTable && !opts.DryRun {
+		// The truncations were done in the transaction opened above and have to
+		// be permanent before the first table is written into its own.
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit: %w", err)
+		}
+	}
+
 	for i, t := range order {
 		tp := p.Tables[t.Name]
 		rows := tp.Rows
@@ -163,9 +185,29 @@ func Run(ctx context.Context, d db.Driver, s *model.Schema, p *plan.Plan, opts O
 		if rows <= 0 {
 			continue
 		}
-		n, err := seedTable(ctx, tx, s, t, tp, locale, seedVal, rows, i, len(order), keys, opts)
+
+		tableTx := tx
+		if opts.TxPerTable && !opts.DryRun {
+			// A parent committed by the previous iteration is what this one
+			// reads its foreign keys from, and the cache built inside the old
+			// transaction is still valid: the keys were committed, not undone.
+			tableTx, err = d.Begin(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		n, err := seedTable(ctx, tableTx, s, t, tp, locale, seedVal, rows, i, len(order), keys, opts)
 		if err != nil {
+			if tableTx != tx {
+				_ = tableTx.Rollback(ctx)
+			}
 			return nil, fmt.Errorf("%s: %w", t.Name, err)
+		}
+		if tableTx != tx {
+			if err := tableTx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("%s: commit: %w", t.Name, err)
+			}
 		}
 		r.Tables = append(r.Tables, TableResult{Table: t.Name, Rows: n})
 		r.Rows += n
@@ -208,9 +250,22 @@ func seedTable(
 	// Foreign keys resolve once per table: every batch draws from the same
 	// parent pool, which keeps children spread evenly over parents rather than
 	// clustered by batch, and costs one query per referenced column.
-	fks, err := resolveFKs(ctx, tx, s, t, tp, keys, opts.DryRun)
+	fks, err := resolveFKs(ctx, tx, s, t, tp, keys, rows, opts.DryRun)
 	if err != nil {
 		return 0, err
+	}
+	// A one-to-one child cannot have more rows than there are parents to point
+	// at. Caught here rather than at the write, where it arrives as a duplicate
+	// key hundreds of thousands of rows in.
+	for col, cp := range tp.Columns {
+		if cp.Skip || cp.Generator != plan.GenForeignKey || !cp.Unique {
+			continue
+		}
+		if n := len(fks[col]); n > 0 && n < rows {
+			return 0, fmt.Errorf(
+				"column %s is a unique foreign key, so %d rows need %d distinct parents but only %d exist",
+				col, rows, rows, n)
+		}
 	}
 	gen.fks = fks
 	gen.cols = cols
@@ -250,7 +305,7 @@ func seedTable(
 		// run, so the column is read back before the first row is generated.
 		// A dry run has nothing to be unique against and nothing to write.
 		if opts.Append && !opts.DryRun {
-			if err := u.preload(ctx, tx, t); err != nil {
+			if err := u.preload(ctx, tx, t, opts.AppendUniqueCap); err != nil {
 				return 0, err
 			}
 		}
@@ -307,6 +362,10 @@ type generator struct {
 	// case Synth is never called at all.
 	hasSynth bool
 
+	// patterns holds the compiled regex generator for every pattern column, so
+	// the expression is parsed once per table rather than once per row.
+	patterns map[string]*patternGen
+
 	// clamp is the declared character limit per text column. A generator knows
 	// what an email looks like but not that this particular column holds 30
 	// characters, and a value one character over is rejected by the database
@@ -325,11 +384,24 @@ func newGenerator(t *model.Table, tp *plan.TablePlan, locale string, baseSeed ui
 	}
 
 	g := &generator{
-		table:  t.Name,
-		tp:     tp,
-		locale: localeOr(locale),
-		seed:   tableSeed,
-		clamp:  textLimits(t, tp),
+		table:    t.Name,
+		tp:       tp,
+		locale:   localeOr(locale),
+		seed:     tableSeed,
+		clamp:    textLimits(t, tp),
+		patterns: map[string]*patternGen{},
+	}
+	for col, cp := range tp.Columns {
+		if cp.Skip || cp.Generator != plan.GenPattern {
+			continue
+		}
+		// Compiled here for the same reason the Synth spec is: a bad expression
+		// must fail before the first row, not on the first batch.
+		pg, err := newPatternGen(cp.Pattern)
+		if err != nil {
+			return nil, fmt.Errorf("column %s: %w", col, err)
+		}
+		g.patterns[col] = pg
 	}
 	if specYAML == nil {
 		return g, nil
@@ -404,13 +476,29 @@ func (g *generator) fill(rows []map[string]any, offset int, r *rand.Rand) {
 			switch cp.Generator {
 			case plan.GenForeignKey:
 				pool := g.fks[col]
-				if len(pool) == 0 {
+				switch {
+				case len(pool) == 0:
 					row[col] = nil
-				} else {
+				case cp.Unique:
+					// One-to-one: parents are handed out in order, so every
+					// child gets a different one and every parent up to the
+					// child count gets exactly one child. A random draw here
+					// would collide long before the pool ran out — the
+					// birthday problem, and the column is unique.
+					row[col] = pool[(offset+i)%len(pool)]
+				default:
 					row[col] = pool[r.IntN(len(pool))]
 				}
 			case plan.GenSequence:
-				row[col] = offset + i + 1
+				start := int64(1)
+				if cp.Start != nil {
+					start = *cp.Start
+				}
+				row[col] = start + int64(offset+i)
+			case plan.GenPattern:
+				if p := g.patterns[col]; p != nil {
+					row[col] = p.generate(r)
+				}
 			case plan.GenNull:
 				row[col] = nil
 			case plan.GenConst:
@@ -442,6 +530,12 @@ func textLimits(t *model.Table, tp *plan.TablePlan) map[string]int {
 	for _, c := range t.Columns {
 		cp := tp.Get(c.Name)
 		if cp == nil || cp.Skip || c.MaxLen <= 0 {
+			continue
+		}
+		if cp.Generator == plan.GenPattern {
+			// A pattern's whole job is to match, and a truncated match does
+			// not. The regex carries its own length bounds; the column's are
+			// checked against them at planning time instead.
 			continue
 		}
 		if plan.Classify(c.Type) == model.ClassString {
@@ -497,9 +591,13 @@ func resolveFKs(
 	t *model.Table,
 	tp *plan.TablePlan,
 	cache map[string][]any,
+	rows int,
 	dryRun bool,
 ) (map[string][]any, error) {
 	out := map[string][]any{}
+	// A cached pool was read for an earlier column and may be smaller than this
+	// one needs, so a one-to-one column re-reads rather than shares.
+	exact := map[string]bool{}
 	for col, cp := range tp.Columns {
 		if cp.Skip || cp.Generator != plan.GenForeignKey {
 			continue
@@ -516,7 +614,14 @@ func resolveFKs(
 		if !ok {
 			return nil, fmt.Errorf("column %s: bad reference %q", col, ref)
 		}
-		if k, hit := cache[ref]; hit {
+		// The pool is capped to bound memory on a parent with millions of rows.
+		// A one-to-one child is the exception: it needs one parent per row, so
+		// the cap has to clear its row count or the run cannot succeed.
+		limit := fkPoolCap
+		if cp.Unique && rows > limit {
+			limit = rows
+		}
+		if k, hit := cache[ref]; hit && (len(k) >= limit || !cp.Unique || exact[ref]) {
 			out[col] = k
 			continue
 		}
@@ -524,12 +629,14 @@ func resolveFKs(
 		if parent == nil {
 			return nil, fmt.Errorf("column %s references unknown table %s", col, parentName)
 		}
-		// The cap bounds memory on a parent with millions of rows. Drawing from
-		// a large sample rather than the whole set changes nothing about
-		// referential integrity and keeps the pool in cache.
-		k, err := tx.ReadKeys(ctx, parent, parentCol, fkPoolCap)
+		// Drawing from a large sample rather than the whole set changes nothing
+		// about referential integrity and keeps the pool in cache.
+		k, err := tx.ReadKeys(ctx, parent, parentCol, limit)
 		if err != nil {
 			return nil, err
+		}
+		if cp.Unique {
+			exact[ref] = true
 		}
 		if len(k) == 0 && !nullable(t, col) {
 			// A dry run never writes the parent, so its key column is empty by

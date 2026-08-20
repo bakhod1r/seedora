@@ -8,7 +8,9 @@
 package plan
 
 import (
+	"regexp/syntax"
 	"sort"
+	"strings"
 
 	"github.com/bakhod1r/seedora/internal/model"
 )
@@ -60,8 +62,18 @@ type ColumnPlan struct {
 	NullRate float64 `json:"null_rate,omitempty" yaml:"null_rate,omitempty"`
 	// References is "table.column" for a foreign key.
 	References string `json:"references,omitempty" yaml:"references,omitempty"`
-	// Pattern is a regex the generated value must match.
+	// Pattern is a regex the generated value must match. With the `pattern`
+	// generator it is the whole definition of the value; with any other
+	// generator it is ignored.
 	Pattern string `json:"pattern,omitempty" yaml:"pattern,omitempty"`
+	// Start is the first value of a sequence, defaulting to 1. A table whose ids
+	// begin at a fixed base — an external id space, a shard's range — is not
+	// seedable without it.
+	Start *int64 `json:"start,omitempty" yaml:"start,omitempty"`
+	// Unenforced records the constraints on this column that generation cannot
+	// promise, so the UI and the CLI can say so before a run rather than after
+	// the database rejects a batch. Advisory: it never changes generation.
+	Unenforced []string `json:"unenforced,omitempty" yaml:"-"`
 	// Const is a fixed value written to every row.
 	Const any `json:"const,omitempty" yaml:"const,omitempty"`
 }
@@ -71,8 +83,10 @@ type ColumnPlan struct {
 const (
 	// GenForeignKey draws from the parent keys written in the same run.
 	GenForeignKey = "foreign_key"
-	// GenSequence is a monotonic counter starting at 1.
+	// GenSequence is a monotonic counter, starting at ColumnPlan.Start or 1.
 	GenSequence = "sequence"
+	// GenPattern generates values matching ColumnPlan.Pattern.
+	GenPattern = "pattern"
 	// GenNull writes NULL to every row.
 	GenNull = "null"
 	// GenConst writes ColumnPlan.Const to every row.
@@ -204,6 +218,61 @@ func (p *Plan) Validate(s *model.Schema) []error {
 	return errs
 }
 
+// UnenforcedChecks lists the CHECK constraints the plan cannot promise to
+// satisfy, in table order.
+//
+// It is not part of Validate because it is not a reason to refuse the run: the
+// data may well satisfy the constraint, and on many schemas it will. It is a
+// reason to say so first. A constraint over two columns — "phone and its country
+// code are both set or both null" — is a statement about a combination, and
+// per-column generation has no way to express one; finding that out from a
+// rejected batch, minutes into a load, is the outcome this exists to avoid.
+func (p *Plan) UnenforcedChecks(s *model.Schema) []string {
+	var out []string
+	for _, t := range s.Tables {
+		tp := p.Tables[t.Name]
+		if tp == nil || tp.Skip || tp.Rows == 0 {
+			continue
+		}
+		for _, ck := range t.Checks {
+			if p.enforces(tp, ck) {
+				continue
+			}
+			// A constraint over columns the plan never writes is the database's
+			// business, not the seeder's.
+			written := false
+			for _, col := range ck.Columns {
+				if cp := tp.Get(col); cp != nil && !cp.Skip && cp.Generator != GenDefault {
+					written = true
+					break
+				}
+			}
+			if !written {
+				continue
+			}
+			out = append(out, t.Name+": CHECK "+ck.Name+" "+ck.Expr)
+		}
+	}
+	return out
+}
+
+// enforces reports whether the plan generates the check's column from the check
+// itself, which is the only case where satisfying it is guaranteed.
+func (p *Plan) enforces(tp *TablePlan, ck *model.Check) bool {
+	if !ck.Enforceable() {
+		return false
+	}
+	cp := tp.Get(ck.Columns[0])
+	if cp == nil {
+		return false
+	}
+	if cp.Skip || cp.Generator == GenNull || cp.Generator == GenDefault {
+		// Nothing is written, so nothing can violate it.
+		return true
+	}
+	return cp.Generator == GenPattern && cp.Pattern != "" && strings.Contains(ck.Expr, cp.Pattern)
+}
+
 func validateColumn(s *model.Schema, table string, c *model.Column, cp *ColumnPlan) []error {
 	var errs []error
 	fail := func(msg string) {
@@ -253,6 +322,14 @@ func validateColumn(s *model.Schema, table string, c *model.Column, cp *ColumnPl
 	case GenNull:
 		if !c.Nullable {
 			fail("null generator on a NOT NULL column")
+		}
+	case GenPattern:
+		if cp.Pattern == "" {
+			fail("pattern generator with no pattern")
+		} else if _, err := syntax.Parse(cp.Pattern, syntax.Perl); err != nil {
+			// Compiled here so a bad regex is a planning error rather than a
+			// failure on the first generated batch.
+			fail("pattern does not compile: " + err.Error())
 		}
 	case "":
 		fail("no generator set")

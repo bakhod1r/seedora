@@ -70,6 +70,23 @@ type Tx interface {
 	Rollback(ctx context.Context) error
 }
 
+// MaxValuer is a transaction that can report the largest value in a numeric
+// column without reading the column.
+//
+// It is optional rather than part of Tx because the answer is an optimisation,
+// not a capability: a driver that cannot give it is handled by reading the
+// values, which is what every driver did before. What it buys is appending to a
+// table with tens of millions of rows. Uniqueness against an integer column
+// needs one number, not the set — everything above the maximum is free by
+// definition — and holding the set instead is gigabytes of heap and slower than
+// generating the rows it protects.
+//
+// ok is false when the column has no value at all: an empty table, or one where
+// every row is NULL.
+type MaxValuer interface {
+	MaxValue(ctx context.Context, t *model.Table, col string) (max int64, ok bool, err error)
+}
+
 // Source is a stream of rows to write, plus whatever went wrong producing them.
 //
 // Splitting the error out of the sequence is what lets generation run on its own

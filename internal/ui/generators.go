@@ -41,7 +41,8 @@ func Generators() []Generator {
 		// Seedora's own come first: they are the ones a schema forces on you.
 		{plan.GenForeignKey, "Foreign key", "structure", anyOf, []string{"references"}},
 		{plan.GenDefault, "Database default", "structure", anyOf, nil},
-		{plan.GenSequence, "Sequential counter", "structure", num, nil},
+		{plan.GenSequence, "Sequential counter", "structure", num, []string{"start"}},
+		{plan.GenPattern, "Regex pattern", "structure", text, []string{"pattern"}},
 		{plan.GenConst, "Fixed value", "structure", anyOf, []string{"const"}},
 		{plan.GenNull, "Always null", "structure", anyOf, nil},
 

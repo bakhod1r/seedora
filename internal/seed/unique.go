@@ -34,6 +34,14 @@ type uniqueSet struct {
 	// in the column, so a counter past the existing maximum is used instead.
 	appending bool
 	next      map[string]int64
+	// counterOnly marks the columns whose existing values were never read,
+	// because a number past the maximum is enough. Every row takes the counter,
+	// since a generated value cannot be checked against a set that is not held.
+	counterOnly map[string]bool
+	// fold marks the columns whose uniqueness is over the case-folded value,
+	// from a `lower(col)` unique index. Two values that differ only in case are
+	// one key to the database and have to be one key here.
+	fold map[string]bool
 }
 
 func newUniqueSet(t *model.Table, tp *plan.TablePlan, rows int) *uniqueSet {
@@ -42,6 +50,9 @@ func newUniqueSet(t *model.Table, tp *plan.TablePlan, rows int) *uniqueSet {
 		kind:   map[string]model.Class{},
 		maxLen: map[string]int{},
 		next:   map[string]int64{},
+
+		counterOnly: map[string]bool{},
+		fold:        map[string]bool{},
 	}
 	for _, c := range t.Columns {
 		cp := tp.Get(c.Name)
@@ -57,6 +68,7 @@ func newUniqueSet(t *model.Table, tp *plan.TablePlan, rows int) *uniqueSet {
 		u.cols[c.Name] = make(map[any]bool, rows)
 		u.kind[c.Name] = plan.Classify(c.Type)
 		u.maxLen[c.Name] = c.MaxLen
+		u.fold[c.Name] = c.UniqueFold
 	}
 	return u
 }
@@ -72,39 +84,90 @@ func (u *uniqueSet) active() bool { return len(u.cols) > 0 }
 // first generated email that matches one already in the table is a constraint
 // violation partway through a run, which is worse than a slow start.
 //
-// A column with more existing values than the cap is refused rather than
+// Not every column has to be read, and the ones that do not are the ones that
+// made this refuse to run at all. An integer column needs a single number: every
+// value above the existing maximum is free, so the counter starts there and no
+// set is held. A UUID is not read either — a repaired value is a fresh v4, and
+// the chance of one colliding with an existing row is smaller than the chance of
+// the hardware getting it wrong. What is left is text, where the existing values
+// genuinely are the constraint, and only that pays the cap.
+//
+// A text column with more existing values than the cap is refused rather than
 // half-read. A partial set would silently pass a duplicate through to the
 // database, and the error it raised there would name the constraint rather than
-// the reason.
-func (u *uniqueSet) preload(ctx context.Context, tx db.Tx, t *model.Table) error {
+// the reason. The cap is a limit on memory, not a judgement, so it is settable.
+func (u *uniqueSet) preload(ctx context.Context, tx db.Tx, t *model.Table, cap int) error {
 	u.appending = true
+	if cap <= 0 {
+		cap = defaultAppendUniqueCap
+	}
 	for col, seen := range u.cols {
-		existing, err := tx.ReadKeys(ctx, t, col, appendUniqueCap)
-		if err != nil {
-			return err
-		}
-		if len(existing) >= appendUniqueCap {
-			return fmt.Errorf("column %s already holds at least %d values: --append "+
-				"cannot guarantee uniqueness against a column that large, so it "+
-				"refuses rather than risk a constraint violation partway through",
-				col, appendUniqueCap)
-		}
-		var maximum int64
-		for _, v := range existing {
-			seen[key(v)] = true
-			if n, ok := toInt64(v); ok && n > maximum {
-				maximum = n
+		switch u.kind[col] {
+		case model.ClassInt, model.ClassFloat:
+			mv, capable := tx.(db.MaxValuer)
+			if !capable {
+				// The driver cannot answer without reading, so read — the old
+				// behaviour, cap and all.
+				if err := u.preloadValues(ctx, tx, t, col, seen, cap); err != nil {
+					return err
+				}
+				continue
+			}
+			maximum, ok, err := mv.MaxValue(ctx, t, col)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				maximum = 0
+			}
+			u.next[col] = maximum + 1
+			// Nothing is read into the set, so a generated value could still
+			// land on an existing one. It is corrected on the way past: while
+			// appending, an integer column takes the counter rather than the
+			// generated number, which is past everything already there.
+			u.counterOnly[col] = true
+
+		case model.ClassUUID:
+			u.next[col] = 1
+
+		default:
+			if err := u.preloadValues(ctx, tx, t, col, seen, cap); err != nil {
+				return err
 			}
 		}
-		u.next[col] = maximum + 1
 	}
 	return nil
 }
 
-// appendUniqueCap bounds what preload will hold in memory. Ten million values
-// is a table nobody seeds into interactively, and reading it is already slower
-// than generating the rows.
-const appendUniqueCap = 10_000_000
+// preloadValues reads a column's existing values into the set.
+func (u *uniqueSet) preloadValues(
+	ctx context.Context, tx db.Tx, t *model.Table,
+	col string, seen map[any]bool, cap int,
+) error {
+	existing, err := tx.ReadKeys(ctx, t, col, cap)
+	if err != nil {
+		return err
+	}
+	if len(existing) >= cap {
+		return fmt.Errorf("column %s already holds at least %d values: --append has to "+
+			"hold every existing value to generate around it, and refuses rather than "+
+			"read a partial set and risk a constraint violation partway through. Raise "+
+			"the limit if the memory is available", col, cap)
+	}
+	var maximum int64
+	for _, v := range existing {
+		seen[u.key(col, v)] = true
+		if n, ok := toInt64(v); ok && n > maximum {
+			maximum = n
+		}
+	}
+	u.next[col] = maximum + 1
+	return nil
+}
+
+// defaultAppendUniqueCap bounds what preload will hold in memory for a text
+// column. Ten million values is already several gigabytes of Go map.
+const defaultAppendUniqueCap = 10_000_000
 
 // enforce makes every unique column in the row unique, repairing collisions.
 func (u *uniqueSet) enforce(row map[string]any, idx int) error {
@@ -115,7 +178,16 @@ func (u *uniqueSet) enforce(row map[string]any, idx int) error {
 			// targets, so several are fine.
 			continue
 		}
-		k := key(v)
+		if u.counterOnly[col] {
+			// The existing values were never read, so the generated one cannot
+			// be cleared against them. The counter can: it starts past the
+			// column's maximum and only goes up.
+			n := u.next[col]
+			u.next[col]++
+			row[col] = n
+			continue
+		}
+		k := u.key(col, v)
 		if !seen[k] {
 			seen[k] = true
 			continue
@@ -124,7 +196,7 @@ func (u *uniqueSet) enforce(row map[string]any, idx int) error {
 		if err != nil {
 			return err
 		}
-		rk := key(repaired)
+		rk := u.key(col, repaired)
 		if seen[rk] {
 			return fmt.Errorf("column %s: cannot make value unique at row %d", col, idx)
 		}
@@ -207,6 +279,21 @@ func trimTo(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// key is the column's own key: the value as the database will compare it. On a
+// column whose unique index is over `lower(col)`, that is the folded value —
+// storing the raw one would let "Bob" and "bob" both through as distinct and
+// leave the database to reject the second.
+func (u *uniqueSet) key(col string, v any) any {
+	k := key(v)
+	if !u.fold[col] {
+		return k
+	}
+	if s, ok := k.(string); ok {
+		return strings.ToLower(s)
+	}
+	return k
 }
 
 // key normalises a value into something a map can hold, since Synth may hand

@@ -549,6 +549,23 @@ func (t *Tx) ReadKeys(ctx context.Context, tb *model.Table, col string, limit in
 	return out, rows.Err()
 }
 
+// MaxValue implements db.Tx.
+func (t *Tx) MaxValue(ctx context.Context, tb *model.Table, col string) (int64, bool, error) {
+	name := model.QuoteIdent(col)
+	if col == "rowid" {
+		name = "rowid"
+	}
+	q := fmt.Sprintf("SELECT max(%s) FROM %s", name, tb.Qualified())
+	var v *int64
+	if err := t.tx.QueryRowContext(ctx, q).Scan(&v); err != nil {
+		return 0, false, fmt.Errorf("read max of %s.%s: %w", tb.Name, col, err)
+	}
+	if v == nil {
+		return 0, false, nil
+	}
+	return *v, true, nil
+}
+
 // Commit implements db.Tx.
 func (t *Tx) Commit(context.Context) error {
 	if t.done {

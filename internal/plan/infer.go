@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"regexp/syntax"
 	"strings"
 
 	"github.com/bakhod1r/synth/infer"
@@ -37,7 +38,20 @@ func Infer(s *model.Schema) *Plan {
 // generated column, enum type) always beats a guess from the column's name,
 // because the catalog is authoritative and the name is a heuristic.
 func InferColumn(s *model.Schema, t *model.Table, c *model.Column) *ColumnPlan {
+	cp := inferColumn(s, t, c)
+	applyChecks(t, c, cp)
+	return cp
+}
+
+func inferColumn(s *model.Schema, t *model.Table, c *model.Column) *ColumnPlan {
 	switch {
+	case c.AlwaysNull:
+		// Every partial index on the table is written `WHERE <col> IS NULL`, so
+		// a row with a value here is a row no index covers. Filling it produces
+		// a dataset that loads cleanly and measures nothing.
+		return &ColumnPlan{Generator: GenNull, Confidence: High,
+			Why: "every partial index requires this column to be NULL"}
+
 	case c.Generated:
 		return &ColumnPlan{Generator: GenDefault, Skip: true, Confidence: High,
 			Why: "database computes this column"}
@@ -47,6 +61,10 @@ func InferColumn(s *model.Schema, t *model.Table, c *model.Column) *ColumnPlan {
 			Generator:  GenForeignKey,
 			References: c.FK.Table + "." + c.FK.Column,
 			NullRate:   0,
+			// A unique foreign key is a one-to-one: each child row takes a
+			// different parent. Drawing at random would give one parent five
+			// children and most parents none, and then fail on the duplicate.
+			Unique:     c.Unique,
 			Confidence: High,
 			Why:        "foreign key to " + c.FK.Table + "." + c.FK.Column,
 		}
@@ -291,10 +309,119 @@ func applyBounds(cp *ColumnPlan, c *model.Column, class Class) {
 	}
 }
 
+// applyChecks folds the column's CHECK constraints into its plan.
+//
+// Two outcomes, and the split is the honest one. A single-column regex is a
+// complete specification of the value, so it replaces whatever the name-based
+// guess was: no generator named `sentence` will ever produce an argon2id hash,
+// and the constraint says exactly what one looks like. Everything else — a
+// constraint over two columns, an OR of several shapes, a comparison against
+// another column — is a statement about a combination that per-column
+// generation cannot promise, so it is recorded on the plan and reported instead
+// of being silently ignored until the database rejects the batch.
+func applyChecks(t *model.Table, c *model.Column, cp *ColumnPlan) {
+	if cp.Generator == GenDefault || cp.Generator == GenNull {
+		// Nothing is written, so nothing can violate a check.
+		return
+	}
+	for _, ck := range t.ChecksFor(c.Name) {
+		if ck.Enforceable() {
+			if pat, ok := checkPattern(ck.Expr, c.Name); ok {
+				cp.Generator = GenPattern
+				cp.Pattern = pat
+				cp.Confidence = High
+				cp.Why = "CHECK " + ck.Name + " constrains the value to " + pat
+				// The regex is now the whole definition; bounds inferred from
+				// the type would only fight it.
+				cp.Min, cp.Max, cp.Values, cp.Weights = nil, nil, nil, nil
+				continue
+			}
+		}
+		cp.Unenforced = append(cp.Unenforced, ck.Name+": "+ck.Expr)
+		if cp.Confidence == High || cp.Confidence == Medium {
+			cp.Confidence = Low
+		}
+		if cp.Why != "" {
+			cp.Why += " — "
+		}
+		cp.Why += "CHECK " + ck.Name + " is not enforced by generation"
+	}
+}
+
+// normalizeOperand reduces the left side of a rendered comparison to the column
+// name. Postgres prints `(nickname)::text`, so the parentheses and the cast come
+// off before the name can be recognised.
+func normalizeOperand(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndex(s, "::"); i > 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	for len(s) >= 2 && s[0] == '(' && s[len(s)-1] == ')' {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return strings.Trim(s, `"`)
+}
+
+// checkPattern reads a single-column regex check and returns the pattern.
+//
+// Postgres renders the constraint back as `(nickname ~ '^[a-z]{3,30}$'::text)`,
+// which is the only shape accepted here: the column, a match operator, and a
+// literal. `~*` is case-insensitive and is not translated, because the generated
+// value has one case and matching it is what matters.
+func checkPattern(expr, col string) (string, bool) {
+	s := strings.TrimSpace(expr)
+	for strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	for _, op := range []string{" ~ ", " ~* "} {
+		lhs, rhs, found := strings.Cut(s, op)
+		if !found {
+			continue
+		}
+		if normalizeOperand(lhs) != col {
+			continue
+		}
+		rhs = strings.TrimSpace(rhs)
+		if i := strings.LastIndex(rhs, "::"); i > 0 {
+			rhs = strings.TrimSpace(rhs[:i])
+		}
+		if len(rhs) < 2 || rhs[0] != '\'' || rhs[len(rhs)-1] != '\'' {
+			continue
+		}
+		pat := strings.ReplaceAll(rhs[1:len(rhs)-1], "''", "'")
+		if pat == "" {
+			continue
+		}
+		if _, err := syntax.Parse(pat, syntax.Perl); err != nil {
+			// A POSIX class or an engine extension Go's parser rejects. Better
+			// reported as unenforced than generated from wrongly.
+			return "", false
+		}
+		return pat, true
+	}
+	return "", false
+}
+
 // finish applies the facts that hold whatever the generator is.
 func finish(cp *ColumnPlan, c *model.Column) {
 	if c.Unique {
 		cp.Unique = true
+	}
+	// A column with nothing to fill it and nothing behind it to fill itself is
+	// written as NULL, and on a NOT NULL column that is a failed insert. This
+	// catches the case where a low-confidence guess reached for the database
+	// default that does not exist.
+	if cp.Skip && !c.Nullable && !c.HasDefault && !c.Generated {
+		cp.Skip = false
+		cp.Confidence = Low
+		cp.Why = "NOT NULL with no database default — a value must be generated"
+		if cp.Generator == GenDefault {
+			if alt := typeOnly(Classify(c.Type), c); alt.Generator != GenDefault {
+				cp.Generator, cp.Const = alt.Generator, alt.Const
+			} else {
+				cp.Generator = string(sschema.KindWord)
+			}
+		}
 	}
 	// A nullable column that carries no meaning gets a light sprinkle of NULLs,
 	// because a dataset where no nullable column is ever null does not exercise

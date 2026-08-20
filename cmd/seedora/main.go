@@ -96,6 +96,9 @@ Common flags:
   --truncate           truncate target tables before seeding
   --append             add rows to tables that already have some; nothing is
                        emptied, and unique columns are read back first
+  --append-unique-cap <n>
+                       existing values --append holds per unique text column
+  --tx-per-table       commit after each table instead of once at the end
   --dry-run            generate and validate without writing
   --migrations <path>  migration directory or .sql file; tables in it that the
                        database lacks are created first
@@ -120,21 +123,23 @@ Environment:
 type flags struct {
 	fs *flag.FlagSet
 
-	dsn      string
-	cfgPath  string
-	rows     int
-	seed     uint64
-	truncate bool
-	appendTo bool
-	dryRun   bool
-	port     int
-	host     string
-	locale   string
-	batch    int
-	force    bool
-	out      string
-	format   string
-	quiet    bool
+	dsn        string
+	cfgPath    string
+	rows       int
+	seed       uint64
+	truncate   bool
+	appendTo   bool
+	appendCap  int
+	txPerTable bool
+	dryRun     bool
+	port       int
+	host       string
+	locale     string
+	batch      int
+	force      bool
+	out        string
+	format     string
+	quiet      bool
 
 	migrations string
 }
@@ -149,6 +154,10 @@ func parseFlags(name string, args []string) (*flags, error) {
 	f.fs.Uint64Var(&f.seed, "seed", 0, "fix the random seed")
 	f.fs.BoolVar(&f.truncate, "truncate", false, "truncate target tables first")
 	f.fs.BoolVar(&f.appendTo, "append", false, "add rows to tables that already have some")
+	f.fs.IntVar(&f.appendCap, "append-unique-cap", 0,
+		"existing values --append holds in memory per unique text column")
+	f.fs.BoolVar(&f.txPerTable, "tx-per-table", false,
+		"commit after each table instead of wrapping the whole run in one transaction")
 	f.fs.BoolVar(&f.dryRun, "dry-run", false, "generate and validate without writing")
 	f.fs.IntVar(&f.port, "port", 0, "UI port")
 	f.fs.StringVar(&f.host, "host", "", "UI bind address")
@@ -200,6 +209,12 @@ func (f *flags) load() (*config.Config, error) {
 	}
 	if f.appendTo {
 		cfg.Append = true
+	}
+	if f.appendCap != 0 {
+		cfg.AppendUniqueCap = f.appendCap
+	}
+	if f.txPerTable {
+		cfg.TxPerTable = true
 	}
 	if f.dryRun {
 		cfg.DryRun = true

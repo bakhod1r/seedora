@@ -96,7 +96,7 @@ func fieldNode(col string, cp *plan.ColumnPlan) (*yaml.Node, error) {
 func synthGenerated(g string) bool {
 	switch g {
 	case plan.GenForeignKey, plan.GenSequence, plan.GenNull,
-		plan.GenConst, plan.GenDefault, "":
+		plan.GenConst, plan.GenDefault, plan.GenPattern, "":
 		return false
 	}
 	return true

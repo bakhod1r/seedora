@@ -44,7 +44,14 @@ type Config struct {
 	// Append adds to tables that already hold rows rather than assuming they
 	// are empty. It is the opposite of Truncate and refuses to run with it.
 	Append bool `env:"SEEDORA_APPEND" desc:"add rows to tables that already have some"`
-	DryRun bool `env:"SEEDORA_DRY_RUN" desc:"generate and validate without writing"`
+	// AppendUniqueCap bounds what --append holds in memory per unique text
+	// column. Zero takes the seeder's default.
+	AppendUniqueCap int `env:"SEEDORA_APPEND_UNIQUE_CAP" desc:"existing values --append holds per unique text column"`
+	// TxPerTable commits each table separately instead of running the whole
+	// seed in one transaction. It trades all-or-nothing for a run that does not
+	// hold one transaction open over a hundred million rows.
+	TxPerTable bool `env:"SEEDORA_TX_PER_TABLE" desc:"commit after each table instead of once at the end"`
+	DryRun     bool `env:"SEEDORA_DRY_RUN" desc:"generate and validate without writing"`
 
 	// AllowProduction disables the production-target guard. It exists so the
 	// guard can be overridden deliberately and never silently.

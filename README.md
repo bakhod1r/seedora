@@ -204,6 +204,8 @@ Common flags:
 | `--seed <n>` | Fix the random seed for reproducible output |
 | `--truncate` | Truncate target tables before seeding |
 | `--append` | Add rows to tables that already have some; nothing is emptied |
+| `--append-unique-cap <n>` | Existing values `--append` holds in memory per unique text column |
+| `--tx-per-table` | Commit after each table instead of wrapping the whole run in one transaction |
 | `--dry-run` | Generate and validate without writing |
 | `--migrations <path>` | Migration directory or `.sql` file; tables in it the database lacks are created first |
 | `--port <n>` | UI port (default `7777`) |
@@ -243,9 +245,27 @@ seedora run --append --rows 5000
 
 Nothing is emptied — not even a table `seedora.yaml` asks to truncate, because that setting describes a run that starts from empty. Every unique column is read back before the first row is generated, so the new rows are unique against the ones already there, and an integer collision is repaired by counting on past the largest value the column holds rather than from the row index. Foreign keys already draw from the parent rows present at the time of the run, so appended children point at parents from either run.
 
+An integer column is not read back at all: uniqueness against one needs a single number, since everything above the existing maximum is free, so the counter starts there and the values stay on disk. A UUID column is not read either — a repaired value is a fresh one, and the chance of it colliding is smaller than the chance of the hardware getting it wrong. That leaves text, where the existing values genuinely are the constraint. Those are held in memory, capped at ten million per column, and a column past the cap is refused rather than half-read; `--append-unique-cap` raises it where the memory is available.
+
 Two limits, both deliberate. `--append` and `--truncate` are refused together: they say opposite things about the rows already in the table. And a join table — one whose primary key is a pair of foreign keys — is refused, because its uniqueness is over the pair and the pairs already stored cannot be read back a column at a time; seed it in one run, or set `rows: 0` for it.
 
 In the UI, **Import YAML** loads a `seedora.yaml` into the running session and **Export** downloads the current mapping. An import is merged against the schema you are connected to: choices for columns that still exist are kept, new columns get a proposal, and columns the database no longer has are dropped. A config that does not fit is reported in full and not applied.
+
+### Constraints the catalog carries
+
+Seeding a schema means satisfying it, and most of what a schema demands is not in the column list.
+
+**CHECK constraints are read.** A single-column regex — `CHECK (nickname ~ '^[a-zA-Z0-9_]{3,30}$')` — becomes the column's generator, because the constraint is a more complete definition of the value than any name-based guess. Values are generated from the expression itself, so a pattern Seedora has never seen works the same as one it has. Everything wider than one column is a statement about a combination — "phone and its country code are both set or both null" — and no per-column generator can promise it. Those are named by `seedora scan` and `seedora validate`, before a run, rather than arriving as a rejected batch minutes into one.
+
+**Partial and expression unique indexes count.** A unique index with a `WHERE` clause constrains fewer rows than a total one, so generating every value distinct satisfies it. An index over `lower(nickname)` constrains the folded value, which raw distinctness does not deliver: `Bob` and `bob` are two values and one key, and uniqueness is enforced on the key.
+
+**The soft-delete stamp is left alone.** When every partial index on a table reads `WHERE deleted_at IS NULL`, a row with a value in `deleted_at` is a row no index covers. Treated as an ordinary nullable column it would get a sprinkle of values, the load would succeed, every constraint would hold, and the dataset would quietly stop measuring the thing it was built to measure. A column every predicate requires to be NULL is written NULL.
+
+### Very large runs
+
+A run is one transaction by default: a failure anywhere leaves the database exactly as it was. That stops being the right trade somewhere past a few tens of millions of rows, where one transaction grows the WAL without bound, holds off autovacuum for the duration, and turns a failure in the last table into a rollback of everything before it. `--tx-per-table` commits each table as it finishes, trading all-or-nothing for a run that can be continued with `--append`.
+
+Two other things that only show up at that size. A sequence can start where the schema starts — `start: 800000001000` for an id space that is not Seedora's to choose. And a unique foreign key is seeded as the one-to-one it is: parents are handed out in order rather than drawn at random, so every child has its own parent instead of one parent collecting five and most collecting none. More children than parents is refused at planning time.
 
 ## Performance
 

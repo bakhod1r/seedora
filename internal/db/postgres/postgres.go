@@ -152,6 +152,9 @@ func (d *Driver) Introspect(ctx context.Context) (*model.Schema, error) {
 	if err := d.loadUniqueIndexes(ctx, byName); err != nil {
 		return nil, err
 	}
+	if err := d.loadChecks(ctx, byName); err != nil {
+		return nil, err
+	}
 	if err := d.loadCounts(ctx, s); err != nil {
 		return nil, err
 	}
@@ -331,17 +334,24 @@ ORDER BY c.relname, con.conname, k.ord`
 // then fail at the insert. `ALTER TABLE ADD CONSTRAINT` is not usable on a
 // table with rows in every case, so the index is the spelling Seedora itself
 // writes — which makes reading it back the other half of that decision.
+//
+// Partial and expression indexes count. A partial unique index constrains fewer
+// rows than a total one, so generating every value distinct satisfies it: the
+// seeder is over-strict, never wrong, and skipping these produced duplicates on
+// exactly the schemas that lean on them hardest. An index over `lower(col)`
+// constrains the folded value, which raw distinctness does not deliver — "Bob"
+// and "bob" are two values and one key.
 func (d *Driver) loadUniqueIndexes(ctx context.Context, byName map[string]*model.Table) error {
 	const q = `
-SELECT c.relname AS table_name, a.attname AS column_name
+SELECT c.relname                                        AS table_name,
+       pg_get_indexdef(i.indexrelid)                    AS indexdef,
+       COALESCE(pg_get_expr(i.indpred, i.indrelid), '') AS predicate
 FROM pg_index i
 JOIN pg_class c     ON c.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
-JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
 WHERE i.indisunique
   AND i.indnkeyatts = 1
   AND NOT i.indisprimary
-  AND i.indpred IS NULL
   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'crdb_internal', 'pg_extension')`
 
 	rows, err := d.conn.Query(ctx, q)
@@ -350,18 +360,109 @@ WHERE i.indisunique
 	}
 	defer rows.Close()
 
+	// predicates accumulates every partial-index predicate per table: a column
+	// is only reliably NULL for live rows if every predicate agrees it is.
+	predicates := map[string][]string{}
+
 	for rows.Next() {
-		var table, column string
-		if err := rows.Scan(&table, &column); err != nil {
+		var table, def, predicate string
+		if err := rows.Scan(&table, &def, &predicate); err != nil {
 			return err
 		}
-		if t, ok := byName[table]; ok {
-			if c := t.Column(column); c != nil {
-				c.Unique = true
+		t, ok := byName[table]
+		if !ok {
+			continue
+		}
+		if predicate != "" {
+			predicates[table] = append(predicates[table], predicate)
+		}
+		column, fold, ok := indexKeyColumn(def)
+		if !ok {
+			// An expression this parser does not recognise — a coalesce, a cast,
+			// a function of the schema's own. Leaving the column unmarked keeps
+			// generation as it was rather than guessing at the key's shape.
+			continue
+		}
+		if c := t.Column(column); c != nil {
+			c.Unique = true
+			if fold {
+				c.UniqueFold = true
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for table, preds := range predicates {
+		t := byName[table]
+		if t == nil {
+			continue
+		}
+		for _, col := range alwaysNullColumns(preds) {
+			if c := t.Column(col); c != nil && c.Nullable {
+				c.AlwaysNull = true
+			}
+		}
+	}
+	return nil
+}
+
+// loadChecks reads the table's CHECK constraints.
+//
+// They are read even though most cannot be satisfied by per-column generation,
+// because not knowing is the worse outcome: the seeder produces a value the
+// constraint forbids, the database rejects the batch, and a run that took
+// minutes to reach that point dies at the write with nothing to show. Read here,
+// a single-column regex check becomes a pattern generator, and everything else
+// is reported at planning time — before a row is generated.
+func (d *Driver) loadChecks(ctx context.Context, byName map[string]*model.Table) error {
+	const q = `
+SELECT c.relname                             AS table_name,
+       con.conname                           AS name,
+       pg_get_expr(con.conbin, con.conrelid) AS expr,
+       COALESCE(
+         (SELECT array_agg(a.attname ORDER BY a.attnum)
+          FROM pg_attribute a
+          WHERE a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey)),
+         '{}') AS columns
+FROM pg_constraint con
+JOIN pg_class c     ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE con.contype = 'c'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'crdb_internal', 'pg_extension')
+ORDER BY c.relname, con.conname`
+
+	rows, err := d.conn.Query(ctx, q)
+	if err != nil {
+		return fmt.Errorf("read check constraints: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var table, name, expr string
+		var cols []string
+		if err := rows.Scan(&table, &name, &expr, &cols); err != nil {
+			return err
+		}
+		t, ok := byName[table]
+		if !ok {
+			continue
+		}
+		// A NOT NULL spelled as a check adds nothing the column does not
+		// already say, and carrying it would mark the column as constrained in
+		// a way the planner cannot satisfy.
+		if len(cols) == 1 && isNotNullCheck(expr) {
+			continue
+		}
+		t.Checks = append(t.Checks, &model.Check{Name: name, Expr: expr, Columns: cols})
+	}
 	return rows.Err()
+}
+
+func isNotNullCheck(expr string) bool {
+	_, wantNull, ok := nullTest(expr)
+	return ok && !wantNull
 }
 
 // loadCounts uses the planner's row estimate rather than COUNT(*). The number
@@ -565,6 +666,22 @@ func (t *Tx) ReadKeys(ctx context.Context, tb *model.Table, col string, limit in
 		}
 	}
 	return out, rows.Err()
+}
+
+// MaxValue implements db.Tx.
+func (t *Tx) MaxValue(ctx context.Context, tb *model.Table, col string) (int64, bool, error) {
+	if err := t.flushTruncate(ctx); err != nil {
+		return 0, false, err
+	}
+	q := fmt.Sprintf("SELECT max(%s) FROM %s", model.QuoteIdent(col), tb.Qualified())
+	var v *int64
+	if err := t.tx.QueryRow(ctx, q).Scan(&v); err != nil {
+		return 0, false, fmt.Errorf("read max of %s.%s: %w", tb.Name, col, err)
+	}
+	if v == nil {
+		return 0, false, nil
+	}
+	return *v, true, nil
 }
 
 // Commit implements db.Tx.

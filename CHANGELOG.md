@@ -10,6 +10,71 @@ it.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-20
+
+Everything here comes from one schema that Seedora could not seed: 33 million
+users, where the invariants live in `CHECK` constraints and partial unique
+indexes rather than in the column list. A seeder that reads only columns,
+single-column uniqueness and foreign keys produces data that schema rejects —
+and rejects at the write, minutes into a load, naming a constraint rather than a
+reason.
+
+### Added
+
+- **`CHECK` constraints are read, and the ones that can be satisfied are.** A
+  single-column regex — `CHECK (nickname ~ '^[a-zA-Z0-9_]{3,30}$')` — becomes a
+  new `pattern` generator that generates from the expression itself, so a
+  constraint Seedora has never seen works the same as one it has. That covers
+  the case no name-based generator can reach: nothing called `sentence` will
+  ever produce an argon2id hash, and `^\$argon2id\$v=\d+\$m=\d+,t=\d+,p=\d+\$`
+  says exactly what one looks like. Constraints over more than one column are a
+  statement about a combination that per-column generation cannot promise; those
+  are named by `seedora scan` and `seedora validate` before a run rather than
+  arriving as a rejected batch during one.
+- **`--tx-per-table`, for runs one transaction cannot hold.** A hundred million
+  rows in a single transaction grows the WAL without bound, holds off autovacuum
+  for the duration, and turns a failure in the last table into a rollback of
+  everything before it. The single transaction stays the default, because
+  all-or-nothing is the right trade nearly always; this is the escape hatch for
+  when it is not, and a run that stops can be continued with `--append`.
+- **`start:` on a sequence.** A table whose ids live in an external space — a
+  shard's range, another system's id base — was not seedable at all, because the
+  counter always began at 1.
+- **`--append-unique-cap`.** The memory `--append` may spend per unique text
+  column, for a machine with the headroom to spend more.
+
+### Fixed
+
+- **Partial and expression unique indexes were ignored, so runs generated
+  duplicates.** Introspection filtered on `indpred IS NULL`, which drops exactly
+  the indexes a schema with soft deletes is built from: `UNIQUE (nickname) WHERE
+  deleted_at IS NULL` was not read as unique, and 33 million nicknames collided.
+  A partial unique index is now treated as unique — generating every value
+  distinct satisfies a constraint that covers fewer rows, so this is over-strict
+  and never wrong. An index over `lower(col)` is read as what it is: uniqueness
+  over the folded value, where `Bob` and `bob` are one key and were previously
+  both let through.
+- **A soft-delete column was filled like any other nullable column.** Inference
+  gave `deleted_at` a 5% sprinkle of values, and every row that got one fell out
+  of every index whose predicate is `WHERE deleted_at IS NULL`. The load
+  succeeded, the constraints held, and the dataset silently stopped measuring
+  what it was built to measure. A column that every partial index on the table
+  requires to be NULL is now written NULL.
+- **A unique foreign key was drawn at random, which is not a one-to-one.** Each
+  child took a random parent from the pool, so one parent collected several
+  children and most collected none — and then the unique constraint rejected the
+  duplicate. Parents are now handed out in order, and a plan asking for more
+  children than there are parents is refused at planning time rather than
+  hundreds of thousands of rows into the write.
+- **`--append` refused any table with more than ten million rows.** It held
+  every existing value of every unique column in memory to generate around them.
+  It no longer reads integer columns at all — uniqueness against one needs a
+  single number, since everything above the maximum is free — and does not read
+  UUID columns either. Only text columns pay the cap, and it is now settable.
+- **A `NOT NULL` column with no database default could be left out of the
+  insert.** A low-confidence inference reached for a default that did not exist,
+  the column was written as NULL, and the row was rejected.
+
 ## [0.5.0] — 2026-08-13
 
 ### Added
@@ -333,7 +398,8 @@ First public version.
   handling, and a fixed `--seed` for reproducible runs.
 - The production-target guard.
 
-[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.6.0
 [0.5.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.5.0
 [0.4.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.4.0
 [0.3.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.3.0

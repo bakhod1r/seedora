@@ -215,6 +215,10 @@ func seedFromConfig(
 		Batch:    cfg.Batch,
 		Truncate: cfg.Truncate,
 		Append:   cfg.Append,
+
+		AppendUniqueCap: cfg.AppendUniqueCap,
+		TxPerTable:      cfg.TxPerTable,
+
 		DryRun:   cfg.DryRun,
 		Progress: progressPrinter(f.quiet),
 	})
@@ -338,7 +342,24 @@ func cmdScan(ctx context.Context, args []string) error {
 	if unsure > 0 {
 		fmt.Printf("%d columns could not be inferred confidently — run `seedora` to review them.\n", unsure)
 	}
+	reportUnenforced(p, s)
 	return nil
+}
+
+// reportUnenforced names the CHECK constraints generation cannot promise to
+// satisfy. Printed rather than returned as an error: the run may well produce
+// data that satisfies them, and the point is that the user hears it before the
+// load rather than from a rejected batch halfway through one.
+func reportUnenforced(p *plan.Plan, s *model.Schema) {
+	unenforced := p.UnenforcedChecks(s)
+	if len(unenforced) == 0 {
+		return
+	}
+	fmt.Printf("\n%d CHECK constraints are not enforced by generation:\n", len(unenforced))
+	for _, c := range unenforced {
+		fmt.Println("  " + c)
+	}
+	fmt.Println("Set the columns they cover explicitly, or expect the database to reject rows.")
 }
 
 // cmdValidate checks a config against the live schema and exits non-zero if it
@@ -372,6 +393,7 @@ func cmdValidate(ctx context.Context, args []string) error {
 	problems := p.Validate(s)
 	if len(problems) == 0 {
 		fmt.Printf("%s is valid against %s\n", cfg.ConfigPath, d.Name())
+		reportUnenforced(p, s)
 		return nil
 	}
 	for _, e := range problems {

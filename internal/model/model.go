@@ -40,6 +40,43 @@ type Table struct {
 	// Rows already present. Seeding an empty table is the normal case; a
 	// non-zero count is what the truncate confirmation reports.
 	ExistingRows int64 `json:"existing_rows"`
+	// Checks are the table's CHECK constraints. A seeder that does not read
+	// them generates data the database then refuses, and the refusal arrives
+	// mid-load rather than at planning time.
+	Checks []*Check `json:"checks,omitempty"`
+}
+
+// Check is one CHECK constraint, as the catalog spells it.
+//
+// Seedora enforces the shapes it can read — a single-column regex becomes a
+// pattern generator — and reports the rest rather than pretending. A constraint
+// spanning several columns is a statement about a combination, and no
+// per-column generator can promise it.
+type Check struct {
+	Name string `json:"name"`
+	// Expr is the constraint body, verbatim from the catalog.
+	Expr string `json:"expr"`
+	// Columns are the columns the expression mentions, in catalog order.
+	Columns []string `json:"columns,omitempty"`
+}
+
+// Enforceable reports whether Seedora can satisfy the check by generation. Only
+// a single-column constraint is a candidate; anything wider is a relationship
+// between columns that per-column generation cannot express.
+func (c *Check) Enforceable() bool { return len(c.Columns) == 1 }
+
+// Checks returns the constraints mentioning a column.
+func (t *Table) ChecksFor(col string) []*Check {
+	var out []*Check
+	for _, ck := range t.Checks {
+		for _, c := range ck.Columns {
+			if c == col {
+				out = append(out, ck)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // Qualified is the table name as a statement must spell it.
@@ -76,6 +113,15 @@ type Column struct {
 	// Generated marks a column the database computes; it can never be written.
 	Generated bool `json:"generated"`
 	Unique    bool `json:"unique"`
+	// UniqueFold means the uniqueness is over a case-folded value —
+	// `CREATE UNIQUE INDEX ON t (lower(nickname))`. Distinct raw values are not
+	// enough: "Bob" and "bob" collide.
+	UniqueFold bool `json:"unique_fold,omitempty"`
+	// AlwaysNull marks a column every partial index on the table requires to be
+	// NULL — the soft-delete stamp. Filling it hides the row from every index
+	// that exists, which makes a seeded dataset useless for measurement even
+	// though the load itself succeeds.
+	AlwaysNull bool `json:"always_null,omitempty"`
 	// MaxLen is the declared character limit, 0 when unbounded.
 	MaxLen int `json:"max_len,omitempty"`
 	// Numeric precision and scale, 0 when not applicable.
