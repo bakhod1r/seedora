@@ -440,7 +440,14 @@ func report(r *seed.Result) {
 	}
 	fmt.Printf("\nSeed %d — pass --seed %d to reproduce this exactly.\n", r.Seed, r.Seed)
 	if r.DryRun {
-		fmt.Println("Nothing was written.")
+		if r.Verified {
+			fmt.Println("Every row was written and rolled back: the database " +
+				"accepted them, constraints and all. Nothing was kept.")
+		} else {
+			fmt.Println("Nothing was written. This engine cannot undo a write, so " +
+				"the rows were generated and discarded rather than offered to the " +
+				"database — no constraint it enforces was checked.")
+		}
 	}
 }
 

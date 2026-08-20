@@ -625,6 +625,10 @@ func (t *Tx) Commit(context.Context) error {
 	return nil
 }
 
+// Atomic implements db.Atomic: this engine commits as it writes, so a rollback
+// undoes nothing and --dry-run must not write.
+func (t *Tx) Atomic() bool { return false }
+
 // Rollback implements db.Tx by reporting that it cannot undo the writes.
 //
 // BatchWriteItem is not atomic even within one batch — each of the 25 requests

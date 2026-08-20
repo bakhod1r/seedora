@@ -200,3 +200,110 @@ func TestTxPerTableWritesEverything(t *testing.T) {
 		t.Errorf("%d orders point at users that do not exist", orphans)
 	}
 }
+
+// A counter into a text column has to be written as text. Sending the integer
+// is a wire-level encoding failure — "unable to encode 1 into binary format for
+// varchar" — which stops the load rather than being coerced.
+func TestSequenceIntoATextColumn(t *testing.T) {
+	const ddl = `CREATE TABLE ext (provider_uid VARCHAR(32) NOT NULL);`
+	d, s, raw := openWith(t, ddl)
+
+	start := int64(1000)
+	p := plan.Infer(s)
+	p.Tables["ext"].Rows = 5
+	p.Tables["ext"].Columns["provider_uid"] = &plan.ColumnPlan{
+		Generator: plan.GenSequence, Start: &start,
+	}
+	if _, err := seed.Run(t.Context(), d, s, p, seed.Options{Seed: 2, Batch: 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := raw.Query(`SELECT typeof(provider_uid), provider_uid FROM ext ORDER BY provider_uid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var first string
+	n := 0
+	for rows.Next() {
+		var typ, v string
+		if err := rows.Scan(&typ, &v); err != nil {
+			t.Fatal(err)
+		}
+		if typ != "text" {
+			t.Fatalf("provider_uid stored as %s, want text", typ)
+		}
+		if n == 0 {
+			first = v
+		}
+		n++
+	}
+	if n != 5 || first != "1000" {
+		t.Errorf("wrote %d rows starting at %q, want 5 starting at \"1000\"", n, first)
+	}
+}
+
+// --dry-run has to reach the database, because everything it is meant to catch
+// is enforced there. A plan that violates a CHECK the seeder cannot satisfy
+// passes generation and fails at the write; a dry run that stops at generation
+// reports success and teaches the user nothing.
+func TestDryRunIsCheckedByTheDatabase(t *testing.T) {
+	const ddl = `
+CREATE TABLE t (
+  id   INTEGER PRIMARY KEY,
+  code VARCHAR(10) NOT NULL CHECK (length(code) = 4)
+);`
+	d, s, raw := openWith(t, ddl)
+
+	p := plan.Infer(s)
+	p.Tables["t"].Rows = 50
+	p.Tables["t"].Columns["code"] = &plan.ColumnPlan{
+		Generator: plan.GenConst, Const: "toolong",
+	}
+
+	if _, err := seed.Run(t.Context(), d, s, p, seed.Options{
+		Seed: 3, Batch: 8, DryRun: true,
+	}); err == nil {
+		t.Fatal("dry run passed a plan the CHECK constraint rejects")
+	}
+
+	var n int
+	if err := raw.QueryRow(`SELECT count(*) FROM t`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("dry run left %d rows behind", n)
+	}
+}
+
+// The other half of the same fact: a valid plan still writes nothing, and says
+// that the database saw the rows.
+func TestDryRunKeepsNothing(t *testing.T) {
+	d, s, raw := open(t)
+
+	p := plan.Infer(s)
+	p.Tables["users"].Rows = 100
+	p.Tables["orders"].Rows = 100
+
+	res, err := seed.Run(t.Context(), d, s, p, seed.Options{Seed: 6, Batch: 32, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Verified {
+		t.Error("dry run on SQLite reported unverified; the transaction can be rolled back")
+	}
+	if res.Rows != 200 {
+		t.Errorf("dry run reported %d rows, want 200", res.Rows)
+	}
+
+	var users, orders int
+	if err := raw.QueryRow(`SELECT count(*) FROM users`).Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.QueryRow(`SELECT count(*) FROM orders`).Scan(&orders); err != nil {
+		t.Fatal(err)
+	}
+	if users != 0 || orders != 0 {
+		t.Errorf("dry run left %d users and %d orders behind", users, orders)
+	}
+}

@@ -444,6 +444,10 @@ func (t *Tx) Commit(context.Context) error {
 	return nil
 }
 
+// Atomic implements db.Atomic: this engine commits as it writes, so a rollback
+// undoes nothing and --dry-run must not write.
+func (t *Tx) Atomic() bool { return false }
+
 // Rollback implements db.Tx by reporting that it cannot undo anything.
 //
 // _bulk is a batch and not an atomic unit: each document is indexed on its own,

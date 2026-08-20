@@ -87,6 +87,30 @@ type MaxValuer interface {
 	MaxValue(ctx context.Context, t *model.Table, col string) (max int64, ok bool, err error)
 }
 
+// Atomic is a transaction that knows whether it can actually be undone.
+//
+// A driver that does not implement it is taken at its word: Begin opened a real
+// transaction and Rollback undoes everything written inside it. The engines that
+// commit as they write — ClickHouse, Trino, Snowflake, BigQuery and the rest —
+// implement this and return false.
+//
+// It exists for --dry-run. The useful dry run writes every row inside the
+// transaction and then rolls it back, because that is the only way to find out
+// what the database thinks: a CHECK constraint, a partial unique index, a type
+// conversion and a foreign key are all enforced on the server, and a run that
+// stops short of the wire has tested none of them. On an engine that cannot undo
+// the write, doing that would seed the database instead of pretending to, so
+// there the dry run generates and stops — and says which of the two it did.
+type Atomic interface {
+	Atomic() bool
+}
+
+// CanRollBack reports whether a transaction's Rollback really undoes the writes.
+func CanRollBack(tx Tx) bool {
+	a, ok := tx.(Atomic)
+	return !ok || a.Atomic()
+}
+
 // Source is a stream of rows to write, plus whatever went wrong producing them.
 //
 // Splitting the error out of the sequence is what lets generation run on its own

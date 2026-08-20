@@ -425,6 +425,10 @@ func (t *Tx) Commit(context.Context) error {
 	return nil
 }
 
+// Atomic implements db.Atomic: this engine commits as it writes, so a rollback
+// undoes nothing and --dry-run must not write.
+func (t *Tx) Atomic() bool { return false }
+
 // Rollback implements db.Tx by reporting that it cannot do what the name says.
 //
 // Returning nil here would be a lie the caller acts on: it would read as "the

@@ -495,6 +495,10 @@ func (t *Tx) Commit(context.Context) error {
 	return nil
 }
 
+// Atomic implements db.Atomic: this engine commits as it writes, so a rollback
+// undoes nothing and --dry-run must not write.
+func (t *Tx) Atomic() bool { return false }
+
 // Rollback implements db.Tx, and cannot do what its name says. Returning nil
 // would report a clean unwind of a table that still holds every row written and
 // is still missing every row truncated, so it names what is left instead — and

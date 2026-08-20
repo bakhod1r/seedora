@@ -10,6 +10,32 @@ it.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-08-20
+
+Three ways a run could be wrong without saying so. All three were found by
+running 0.6.0 against a real schema rather than by reading the code.
+
+### Fixed
+
+- **`--dry-run` never reached the database, so it proved nothing.** It generated
+  every row and threw them away. Everything the flag is meant to catch — a CHECK
+  constraint, a unique index, a foreign key, the encoding of a value into its
+  column's type — is enforced on the server, so a dry run passed seventeen
+  tables and the same config then failed on the first one. It now writes every
+  row inside the transaction and rolls the transaction back, which tests exactly
+  what a real run would face and keeps nothing. On an engine whose transaction
+  cannot be undone, writing would seed the database rather than pretend to, so
+  there it still generates and stops — and says so instead of reporting the same
+  success.
+- **`rows: 0` was silently overwritten with the inferred default.** A merge could
+  not tell "seed nothing from this table" from "no count was given", so the way
+  the README documents for leaving a table out did the opposite: 32 tables set
+  to zero were re-scanned and each seeded a thousand rows.
+- **A sequence into a text column failed at the wire.** The counter was always
+  written as an integer, so `provider_uid VARCHAR` produced `unable to encode 1
+  into binary format for varchar` rather than "1". The column's type decides how
+  the counter is written.
+
 ## [0.6.0] — 2026-08-20
 
 Everything here comes from one schema that Seedora could not seed: 33 million
@@ -398,7 +424,8 @@ First public version.
   handling, and a fixed `--seed` for reproducible runs.
 - The production-target guard.
 
-[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/bakhod1r/seedora/releases/tag/v0.6.1
 [0.6.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.6.0
 [0.5.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.5.0
 [0.4.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.4.0

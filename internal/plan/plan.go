@@ -8,9 +8,12 @@
 package plan
 
 import (
+	"encoding/json"
 	"regexp/syntax"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/bakhod1r/seedora/internal/model"
 )
@@ -33,6 +36,68 @@ type TablePlan struct {
 	// order preserves catalog column order, which JSON and YAML maps lose. The
 	// UI renders in this order and bulk writers emit in it.
 	Order []string `json:"order,omitempty" yaml:"-"`
+
+	// rowsSet records that the file said `rows:` rather than leaving it out.
+	// Without it zero is two different statements in one value — "seed no rows
+	// from this table", which the README documents, and "I never mentioned a
+	// count, propose one" — and a merge has to pick one. It picked the wrong
+	// one, and `rows: 0` on a table silently became a thousand rows.
+	rowsSet bool
+}
+
+// RowsExplicit reports whether the row count was written down rather than left
+// to inference.
+func (t *TablePlan) RowsExplicit() bool { return t.rowsSet }
+
+// SetRows sets the row count as a decision, which a merge will not overwrite.
+func (t *TablePlan) SetRows(n int) {
+	t.Rows = n
+	t.rowsSet = true
+}
+
+// tablePlan is TablePlan without its unmarshalers, so decoding into it does not
+// recurse back into them.
+type tablePlan TablePlan
+
+// UnmarshalYAML decodes a table plan and records whether it named a row count.
+func (t *TablePlan) UnmarshalYAML(value *yaml.Node) error {
+	var raw tablePlan
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*t = TablePlan(raw)
+	t.rowsSet = hasYAMLKey(value, "rows")
+	return nil
+}
+
+// UnmarshalJSON is the same fact for the UI, which sends the plan as JSON.
+func (t *TablePlan) UnmarshalJSON(data []byte) error {
+	var raw tablePlan
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*t = TablePlan(raw)
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return err
+	}
+	_, t.rowsSet = keys["rows"]
+	return nil
+}
+
+func hasYAMLKey(n *yaml.Node, key string) bool {
+	if n.Kind == yaml.DocumentNode && len(n.Content) == 1 {
+		n = n.Content[0]
+	}
+	if n.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
 }
 
 // ColumnPlan is the generator chosen for one column, plus its options.
@@ -146,7 +211,9 @@ func (p *Plan) Merge(fresh *Plan) {
 		if len(ot.Order) == 0 {
 			ot.Order = ft.Order
 		}
-		if ot.Rows == 0 {
+		// `rows: 0` is a decision — the README's way of leaving a table out —
+		// and only an absent count is a question for inference to answer.
+		if ot.Rows == 0 && !ot.rowsSet {
 			ot.Rows = ft.Rows
 		}
 		if ot.Columns == nil {

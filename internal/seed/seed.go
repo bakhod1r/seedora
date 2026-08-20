@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"iter"
 	"math/rand/v2"
+	"strconv"
 	"sync"
 	"time"
 
@@ -82,6 +83,12 @@ type Result struct {
 	Rows     int64         `json:"rows"`
 	Duration time.Duration `json:"duration"`
 	DryRun   bool          `json:"dry_run"`
+	// Verified is true when a dry run reached the database: the rows were
+	// written inside the transaction and the transaction was rolled back, so
+	// every constraint the server enforces was exercised. False on an engine
+	// whose transaction cannot be undone, where a dry run stops at generation
+	// and proves nothing about what the database would have said.
+	Verified bool `json:"verified,omitempty"`
 }
 
 // RowsPerSecond is the throughput the run achieved.
@@ -146,13 +153,20 @@ func Run(ctx context.Context, d db.Driver, s *model.Schema, p *plan.Plan, opts O
 
 	r := &Result{Seed: seedVal, DryRun: opts.DryRun}
 
+	// A dry run that can be rolled back writes like any other run: the rows go
+	// to the database and the transaction is undone at the end. Everything below
+	// keys off this rather than off DryRun, because a dry run that writes has to
+	// truncate, resolve real parent keys, and be unique against what is there.
+	writing := !opts.DryRun || db.CanRollBack(tx)
+	r.Verified = opts.DryRun && writing
+
 	// Truncation runs for every table before any table is written, in reverse
 	// dependency order. Doing it as we go would delete a parent's rows after
 	// its children already pointed at them.
 	// --append overrides the plan as well as the flag. A per-table Truncate in
 	// seedora.yaml is a statement about a run that starts from empty, and this
 	// one does not.
-	if !opts.DryRun && !opts.Append {
+	if writing && !opts.Append {
 		for i := len(order) - 1; i >= 0; i-- {
 			t := order[i]
 			if !opts.Truncate && !p.Tables[t.Name].Truncate {
@@ -242,6 +256,11 @@ func seedTable(
 		return 0, err
 	}
 
+	// A dry run only stops at generation where the transaction cannot be undone.
+	// Everywhere else it writes and is rolled back, which is the only way to
+	// learn what the database thinks of the rows.
+	generateOnly := opts.DryRun && !db.CanRollBack(tx)
+
 	gen, err := newGenerator(t, tp, locale, baseSeed, opts.Batch)
 	if err != nil {
 		return 0, err
@@ -250,7 +269,10 @@ func seedTable(
 	// Foreign keys resolve once per table: every batch draws from the same
 	// parent pool, which keeps children spread evenly over parents rather than
 	// clustered by batch, and costs one query per referenced column.
-	fks, err := resolveFKs(ctx, tx, s, t, tp, keys, rows, opts.DryRun)
+	// A dry run that writes has real parent rows to point at, in its own
+	// transaction, so it resolves foreign keys exactly as a real run does. Only
+	// the dry run that never wrote needs a stand-in pool.
+	fks, err := resolveFKs(ctx, tx, s, t, tp, keys, rows, generateOnly)
 	if err != nil {
 		return 0, err
 	}
@@ -287,7 +309,7 @@ func seedTable(
 		// pairs from the same parent pools as the previous run and collide with
 		// it, so this is refused where it can be explained rather than left to
 		// surface as a constraint violation with a run half written.
-		if opts.Append && !opts.DryRun {
+		if opts.Append && !generateOnly {
 			return 0, errors.New("--append is not supported on a join table: its " +
 				"uniqueness is over the pair of foreign keys, and the pairs already " +
 				"present cannot be read back to generate around them. Seed it in one " +
@@ -303,8 +325,9 @@ func seedTable(
 	if u := newUniqueSet(t, tp, rows); u.active() {
 		// Appending has to be unique against the table, not only against the
 		// run, so the column is read back before the first row is generated.
-		// A dry run has nothing to be unique against and nothing to write.
-		if opts.Append && !opts.DryRun {
+		// A dry run that never writes has nothing to be unique against; one that
+		// does is unique against the same rows a real run would face.
+		if opts.Append && !generateOnly {
 			if err := u.preload(ctx, tx, t, opts.AppendUniqueCap); err != nil {
 				return 0, err
 			}
@@ -325,15 +348,23 @@ func seedTable(
 		}
 	}
 
-	if opts.DryRun {
+	// A dry run on an engine that can undo the write does write: the rows go
+	// down the wire inside the transaction and the transaction is rolled back.
+	// Everything the database enforces — CHECK constraints, partial and
+	// expression unique indexes, foreign keys, the encoding of every value into
+	// the column's type — is enforced on the server and nowhere else, so a run
+	// that stops short of the wire has checked none of it and still reports
+	// success. That is the failure this flag exists to prevent.
+	if generateOnly {
 		return drain(src)
 	}
 	return tx.Insert(ctx, t, cols, src)
 }
 
-// drain consumes a source without writing, for --dry-run. Everything that could
-// fail during a real run — generation, foreign-key resolution, uniqueness —
-// still runs, which is the point of the flag.
+// drain consumes a source without writing. It is what --dry-run falls back to
+// on an engine whose transaction cannot be undone, where writing the rows would
+// seed the database rather than pretend to. Generation, foreign-key resolution
+// and uniqueness still run; nothing the server enforces does.
 func drain(src db.Source) (int64, error) {
 	var n int64
 	for range src.Rows() {
@@ -361,6 +392,10 @@ type generator struct {
 	// hasSynth is false when every column is filled by Seedora itself, in which
 	// case Synth is never called at all.
 	hasSynth bool
+
+	// seqText marks the sequence columns whose type is text, so the counter is
+	// written as a string rather than as an integer the column cannot hold.
+	seqText map[string]bool
 
 	// patterns holds the compiled regex generator for every pattern column, so
 	// the expression is parsed once per table rather than once per row.
@@ -390,6 +425,17 @@ func newGenerator(t *model.Table, tp *plan.TablePlan, locale string, baseSeed ui
 		seed:     tableSeed,
 		clamp:    textLimits(t, tp),
 		patterns: map[string]*patternGen{},
+		seqText:  map[string]bool{},
+	}
+	for _, c := range t.Columns {
+		cp := tp.Get(c.Name)
+		if cp == nil || cp.Skip || cp.Generator != plan.GenSequence {
+			continue
+		}
+		switch plan.Classify(c.Type) {
+		case plan.ClassString, plan.ClassUUID:
+			g.seqText[c.Name] = true
+		}
 	}
 	for col, cp := range tp.Columns {
 		if cp.Skip || cp.Generator != plan.GenPattern {
@@ -494,7 +540,17 @@ func (g *generator) fill(rows []map[string]any, offset int, r *rand.Rand) {
 				if cp.Start != nil {
 					start = *cp.Start
 				}
-				row[col] = start + int64(offset+i)
+				n := start + int64(offset+i)
+				// A counter into a text column is written as text. The column
+				// decides, not the generator: `provider_uid VARCHAR` holds
+				// "1000", and sending the integer is a wire-level encoding
+				// error that stops the load rather than a value the column
+				// refuses.
+				if g.seqText[col] {
+					row[col] = strconv.FormatInt(n, 10)
+				} else {
+					row[col] = n
+				}
 			case plan.GenPattern:
 				if p := g.patterns[col]; p != nil {
 					row[col] = p.generate(r)
@@ -592,7 +648,7 @@ func resolveFKs(
 	tp *plan.TablePlan,
 	cache map[string][]any,
 	rows int,
-	dryRun bool,
+	generateOnly bool,
 ) (map[string][]any, error) {
 	out := map[string][]any{}
 	// A cached pool was read for an earlier column and may be smaller than this
@@ -639,11 +695,13 @@ func resolveFKs(
 			exact[ref] = true
 		}
 		if len(k) == 0 && !nullable(t, col) {
-			// A dry run never writes the parent, so its key column is empty by
-			// construction. Standing in a placeholder pool lets the rest of the
-			// plan be exercised, which is the point of the flag; a real run
-			// still fails here, because there it means a genuinely empty parent.
-			if !dryRun {
+			// A dry run that could not write never wrote the parent, so its key
+			// column is empty by construction. Standing in a placeholder pool
+			// lets the rest of the plan be exercised, which is the point of the
+			// flag; every other run fails here, because there it means a
+			// genuinely empty parent — and a dry run that does write has to
+			// fail, since the values it invented would be rejected anyway.
+			if !generateOnly {
 				return nil, fmt.Errorf("column %s references %s, which has no rows",
 					col, parentName)
 			}

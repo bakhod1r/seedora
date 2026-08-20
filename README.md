@@ -251,6 +251,12 @@ Two limits, both deliberate. `--append` and `--truncate` are refused together: t
 
 In the UI, **Import YAML** loads a `seedora.yaml` into the running session and **Export** downloads the current mapping. An import is merged against the schema you are connected to: choices for columns that still exist are kept, new columns get a proposal, and columns the database no longer has are dropped. A config that does not fit is reported in full and not applied.
 
+### Checking a plan without keeping the rows
+
+`--dry-run` writes every row into the transaction and then rolls the transaction back. That is deliberate, and it is what makes the flag worth running: a CHECK constraint, a partial unique index, a foreign key and the encoding of a value into its column's type are all enforced by the database and by nothing else, so a dry run that stops at generation reports success and has checked none of them.
+
+Nothing is kept — the transaction is undone, including any truncation the plan asked for. On an engine that commits as it writes, where a rollback would undo nothing, the dry run generates and stops instead of seeding the database by accident, and the output says which of the two it did.
+
 ### Constraints the catalog carries
 
 Seeding a schema means satisfying it, and most of what a schema demands is not in the column list.
