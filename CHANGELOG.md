@@ -10,6 +10,8 @@ it.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-22
+
 ### Changed
 
 - **The diagram packs tighter.** Cards sat 36px apart horizontally and 12px
@@ -441,7 +443,8 @@ First public version.
   handling, and a fixed `--seed` for reproducible runs.
 - The production-target guard.
 
-[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/bakhod1r/seedora/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/bakhod1r/seedora/releases/tag/v0.6.1
 [0.6.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.6.0
 [0.5.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.5.0

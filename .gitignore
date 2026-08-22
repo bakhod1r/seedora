@@ -3,6 +3,7 @@
 # would keep the source out of the repository.
 /seedora
 /pages
+/bin/
 
 # Scratch database and config produced by `make demo` and `make dev`.
 /tmp/
