@@ -52,7 +52,7 @@ test:
 # runner, no dependencies, no package.json: the point of this project is not
 # having a JavaScript toolchain.
 test-js:
-	node --test tests/ui/
+	node --test tests/ui/*.test.mjs
 
 # The page in a real Chromium: the layout as the browser computes it, the drag
 # gestures, and a seeding run driven from the UI. This is the only target with

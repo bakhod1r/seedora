@@ -154,3 +154,25 @@ test("a hand-placed waypoint overrides the computed route", () => {
   assert.notEqual(withHold, without, "the waypoint changed nothing");
   assert.ok(withHold.includes("777"), `route does not pass through the waypoint: ${withHold}`);
 });
+
+// The corridors are proposed from the middle of the two cards outwards, and the
+// middle is not where the shortest route runs when the cards are far apart. So
+// the clear candidates are costed and the cheapest wins, rather than the first
+// one that happened to miss everything.
+test("of two clear routes, the shorter one is drawn", () => {
+  // One card in the way, with room on both sides of it. The corridor just past
+  // the obstacle and the one at the far right are both clear; only the near one
+  // is short.
+  const from = box("child", 0, 400);
+  const blocking = box("wall", 300, 380);
+  const far = box("outpost", 2000, 0);
+  const to = box("parent", 600, 0);
+  const boxes = [from, blocking, far, to];
+
+  const points = routePoints(from.right, 450, to.left, 50, boxes, "child", "parent");
+
+  assert.ok(isClear(points, boxes, "child", "parent"), "route crosses a card");
+  const rightmost = Math.max(...points.map((p) => p.x));
+  assert.ok(rightmost < far.left,
+    `the route detoured out to ${rightmost}, past a card at ${far.left}`);
+});

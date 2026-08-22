@@ -10,6 +10,23 @@ it.
 
 ## [Unreleased]
 
+### Changed
+
+- **The diagram packs tighter.** Cards sat 36px apart horizontally and 12px
+  vertically, which read as a scatter rather than a schema. They are now 28px
+  and 8px. 28 is a floor, not a preference: the edge router only treats a
+  corridor wider than 26px as a lane, so a narrower gap would push the arrows
+  along the sides of the cards instead of down the channel between the columns.
+- **The view controls moved to the canvas rail.** Theme, "Fold all", and "Tidy
+  up" were in the top bar, away from the fit control they are used with. They
+  are icon buttons under it now, and each has a keyboard shortcut.
+
+### Fixed
+
+- **`make test-js` did not run.** `node --test tests/ui/` resolves the directory
+  as a module under Node 24 and fails before running anything, which the
+  `test-all` target inherited. It globs the test files instead.
+
 ## [0.6.1] — 2026-08-20
 
 Three ways a run could be wrong without saying so. All three were found by

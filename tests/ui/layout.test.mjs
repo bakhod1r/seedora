@@ -14,7 +14,7 @@ import { loadApp, reader } from "./harness.mjs";
 const app = loadApp();
 const read = reader(app);
 const GAP_Y = read("GAP_Y");
-const { relax, separate } = app;
+const { relax, separate, close, lift, slackFor } = app;
 const state = read("app");
 
 // relax orders each column by where its parents sit in the one before it, and
@@ -202,4 +202,81 @@ test("separate moves a card up out of an anchor rather than through it", () => {
     `the card above still overlaps the anchor: its bottom is ${above.y + above.h}, ` +
     `the anchor starts at ${anchored.y}`);
   assert.deepEqual(overlaps(new Map(column.map((n) => [n.name, n]))), []);
+});
+
+// ---- closing the holes
+//
+// The relaxation leaves gaps: a card pulled down towards its neighbours takes
+// its column's height with it and nothing fills the space it left. close and
+// lift are what take that space back, and both have to do it without disturbing
+// the order the pull worked out or the cards somebody pinned.
+
+test("close pulls a card up to the slack above it", () => {
+  const column = [node("a", 0, 0), node("b", 0, 4000)];
+
+  close(column);
+
+  const [a, b] = [...column].sort((x, y) => x.y - y.y);
+  assert.ok(b.y < 4000, "the card did not move");
+  assert.ok(b.y <= a.y + a.h + slackFor(a.h) + 0.001,
+    `gap is ${(b.y - a.y - a.h).toFixed(1)}, want at most ${slackFor(a.h)}`);
+});
+
+test("close leaves a card that is already close alone", () => {
+  const column = [node("a", 0, 0), node("b", 0, 200 + GAP_Y)];
+  close(column);
+
+  const b = column[1];
+  assert.equal(b.y, 200 + GAP_Y, "a card that was already tight was moved");
+});
+
+test("close does not move a pinned card", () => {
+  const column = [node("a", 0, 0), node("b", 0, 4000, [], { fixed: true })];
+  close(column);
+
+  assert.equal(column[1].y, 4000, "a pinned card was pulled up");
+});
+
+test("close keeps the order it was given", () => {
+  const column = [node("a", 0, 0), node("b", 0, 3000), node("c", 0, 5000)];
+  close(column);
+
+  const order = [...column].sort((x, y) => x.y - y.y).map((n) => n.name);
+  assert.deepEqual(order, ["a", "b", "c"]);
+});
+
+test("lift slides a column up to the top of the drawing", () => {
+  const left = [node("a", 0, 0), node("b", 0, 300)];
+  const right = [node("c", 1, 2000), node("d", 1, 2300)];
+
+  lift([left, right]);
+
+  assert.equal(left[0].y, 0, "the topmost column moved");
+  assert.ok(right[0].y <= slackFor(right[0].h) + 0.001,
+    `the lifted column starts at ${right[0].y}, want at most ${slackFor(right[0].h)}`);
+  // Moved as one piece: the arrangement inside it is what the pull worked out.
+  assert.equal(right[1].y - right[0].y, 300, "the column's internal spacing changed");
+});
+
+test("lift leaves a column holding a pinned card where it is", () => {
+  const left = [node("a", 0, 0)];
+  const right = [node("c", 1, 2000, [], { fixed: true }), node("d", 1, 2300)];
+
+  lift([left, right]);
+
+  assert.equal(right[0].y, 2000, "a column with a pinned card was lifted");
+  assert.equal(right[1].y, 2300, "a card beside a pinned one was lifted");
+});
+
+// Every column is measured against the top of the drawing, not against the one
+// before it, so which order they arrive in changes nothing.
+test("lift raises a column whatever its place in the list", () => {
+  const late = [node("a", 0, 500)];
+  const first = [node("c", 1, 0)];
+
+  lift([late, first]);
+
+  assert.equal(first[0].y, 0, "the topmost column was moved");
+  assert.ok(late[0].y <= slackFor(late[0].h) + 0.001,
+    `the trailing column starts at ${late[0].y}, want at most ${slackFor(late[0].h)}`);
 });

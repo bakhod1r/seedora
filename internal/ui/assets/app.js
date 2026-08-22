@@ -1274,8 +1274,11 @@ function openHueMenu(table, anchor) {
 // would mean every teammate's window size showed up as a diff.
 
 const CARD_W = 300;
-const GAP_X = 92;
-const GAP_Y = 26;
+// The horizontal gap is what the edge router calls a lane, and `lanes` only
+// counts a corridor wider than 26px, so this cannot go below that without the
+// columns losing the channel their arrows run down.
+const GAP_X = 28;
+const GAP_Y = 8;
 
 const layoutKey = () =>
   "seedora:layout:" + (app.state && app.state.target ? app.state.target : "?");
@@ -1432,30 +1435,83 @@ function orderColumn(names, previous) {
 // Related cards end up level with each other and next to each other, which is
 // the arrangement someone would reach for by hand.
 function autoLayout() {
-  let offsetY = 0;
-
+  // Each group is arranged on its own and measured, then the groups are packed
+  // together. Stacking them in one tall pile instead — which is what putting
+  // every group under the one before it amounts to — costs a screen of empty
+  // space for every lone table the schema happens to carry.
+  const laid = [];
   for (const group of relatedGroups()) {
     const nodes = buildNodes(group);
     if (nodes.size === 0) continue;
 
     relax(nodes);
 
-    // The group is lifted to sit under the one before it, so two unrelated
-    // schemas read as two schemas.
     let top = Infinity;
+    let left = Infinity;
     let bottom = -Infinity;
+    let right = -Infinity;
     for (const n of nodes.values()) {
       top = Math.min(top, n.y);
+      left = Math.min(left, n.x);
       bottom = Math.max(bottom, n.y + n.h);
+      right = Math.max(right, n.x + CARD_W);
     }
-    for (const n of nodes.values()) {
+    laid.push({ nodes, top, left, w: right - left, h: bottom - top });
+  }
+  if (laid.length === 0) return;
+
+  // The first group is the schema someone opened the page to look at, and it
+  // starts at the top left. Everything else is a satellite — a lookup table
+  // nothing points at, a migration ledger — and those go in one row underneath,
+  // side by side, tight against the bottom of the main group rather than a
+  // screen below it. Scattering them into the gaps between its columns would
+  // pack tighter and read as one schema with tables loose in it, which is the
+  // opposite of what the split into groups is saying.
+  const step = CARD_W + GAP_X;
+  const width = Math.max(laid[0].w, CARD_W * 3);
+
+  let rowX = 0;
+  let rowY = 0;
+  let rowH = 0;
+
+  for (const [i, g] of laid.entries()) {
+    if (i > 0 && rowX > 0 && rowX + g.w > width) {
+      rowY += rowH + GAP_Y * 2;
+      rowX = 0;
+      rowH = 0;
+    }
+
+    const shelfX = i === 0 ? 0 : Math.round(rowX / step) * step;
+    const shelfY = rowY;
+
+    for (const n of g.nodes.values()) {
       // Recomputed rather than kept, because the heights it was computed from
       // change every time a card is folded or unfolded.
       if (!n.fixed) {
-        app.layout[n.name] = { x: n.x, y: Math.max(0, n.y - top + offsetY) };
+        app.layout[n.name] = {
+          x: n.x - g.left + shelfX,
+          y: Math.max(0, n.y - g.top + shelfY),
+        };
       }
     }
-    offsetY += bottom - top + GAP_Y * 3;
+
+    if (i === 0) {
+      // The next row starts under the longest column, not under the group's
+      // box: the box is as tall as its tallest card's bottom edge either way,
+      // but reading it off the cards keeps this honest when a group is packed
+      // by something other than the column stacking.
+      let bottom = 0;
+      for (const n of g.nodes.values()) {
+        const pos = app.layout[n.name];
+        if (pos) bottom = Math.max(bottom, pos.y + n.h);
+      }
+      rowY = bottom + GAP_Y * 2;
+      rowX = 0;
+      rowH = 0;
+    } else {
+      rowX = shelfX + g.w + GAP_X;
+      rowH = Math.max(rowH, g.h);
+    }
   }
 }
 
@@ -1492,6 +1548,8 @@ function buildNodes(group) {
     }
   }
 
+  wrapColumns(nodes);
+
   for (const n of nodes.values()) {
     n.x = n.depth * (CARD_W + GAP_X);
     if (n.fixed && app.layout[n.name]) {
@@ -1511,6 +1569,55 @@ function buildNodes(group) {
     }
   }
   return nodes;
+}
+
+// wrapColumns splits a column that is taller than the picture is wide into
+// several columns side by side.
+//
+// The dependency depth alone gives a schema like this one a first column of two
+// tables and a second of thirty, which is a ribbon nobody can read without
+// scrolling past the end of it. A tall column is cut into lanes of a target
+// height and the lanes sit next to each other, so the drawing fills a screen
+// instead of a corridor. Lanes of one depth stay contiguous and ahead of the
+// next depth's, so parents are still left of their children.
+function wrapColumns(nodes) {
+  const columns = columnsOf(nodes);
+
+  let total = 0;
+  for (const n of nodes.values()) total += n.h + GAP_Y;
+  if (total === 0) return;
+
+  // The height that makes the whole thing about as wide as a screen is tall:
+  // lanes * laneWidth / height ≈ ASPECT with lanes * height ≈ total.
+  const ASPECT = 1.7;
+  const target = Math.max(600, Math.sqrt((total * (CARD_W + GAP_X)) / ASPECT));
+
+  let base = 0;
+  for (const [, names] of columns) {
+    let tall = 0;
+    for (const name of names) tall += nodes.get(name).h + GAP_Y;
+
+    // Filling each lane to the target and starting a new one when it overflows
+    // leaves the last lane with whatever is left over — one card beside a lane
+    // of nine, and every edge into that card crossing the width of the picture.
+    // The lanes are counted first and the column divided between them, so they
+    // come out the same length.
+    const lanes = Math.max(1, Math.ceil(tall / target));
+    const budget = tall / lanes;
+
+    let lane = 0;
+    let used = 0;
+    for (const name of names) {
+      const n = nodes.get(name);
+      if (used > 0 && used + n.h / 2 > budget && lane < lanes - 1) {
+        lane++;
+        used = 0;
+      }
+      n.depth = base + lane;
+      used += n.h + GAP_Y;
+    }
+    base += lanes;
+  }
 }
 
 // columnsOf groups the nodes by column, each column ordered by the tables its
@@ -1575,7 +1682,78 @@ function relax(nodes) {
 
   // One last separation pass per column, because the final pull can leave two
   // cards touching and an overlap is worse than an imperfect height.
-  for (const [, names] of columns) separate(names.map((x) => nodes.get(x)));
+  const laid = [];
+  for (const [, names] of columns) {
+    const column = names.map((x) => nodes.get(x));
+    separate(column);
+    close(column);
+    laid.push(column);
+  }
+  lift(laid);
+}
+
+// lift slides a whole column up until it starts near the top of the drawing.
+//
+// Closing the holes inside a column does nothing about the one above its first
+// card, and that is the big one: a column of children hangs off whatever height
+// its parents ended up at, so a column can begin two screens below the top with
+// nothing at all in the space above it. The column moves as one piece, which
+// costs nothing — the arrangement inside it, which is what the pull worked out,
+// arrives unchanged.
+function lift(columns) {
+  let top = Infinity;
+  for (const column of columns) {
+    for (const n of column) top = Math.min(top, n.y);
+  }
+  if (!isFinite(top)) return;
+
+  for (const column of columns) {
+    if (column.some((n) => n.fixed)) continue;
+
+    let start = Infinity;
+    let first = null;
+    for (const n of column) {
+      if (n.y < start) {
+        start = n.y;
+        first = n;
+      }
+    }
+
+    const hole = start - top - slackFor(first.h);
+    if (hole > 0) {
+      for (const n of column) n.y -= hole;
+    }
+  }
+}
+
+// close takes the empty space back out of a column.
+//
+// The pull is what lines a card up with the tables it is joined to, and it is
+// also what leaves a hole: a card whose neighbours all sit low is dragged down
+// and the space it came from stays empty, one hole per column, which on a
+// schema of thirty tables adds up to more page than schema. A card is allowed
+// to keep a few gaps of slack — that is the alignment the pull bought — and
+// everything past that is closed up, in order, so nothing crosses anything.
+function close(column) {
+  const items = [...column].sort((a, b) => a.y - b.y);
+
+  for (let i = 1; i < items.length; i++) {
+    const above = items[i - 1];
+    const here = items[i];
+    if (here.fixed) continue;
+    const ceiling = above.y + above.h + slackFor(above.h);
+    if (here.y > ceiling) here.y = ceiling;
+  }
+}
+
+// slackFor is how much empty space a card is allowed to keep above it.
+//
+// Measured against the card rather than fixed, because the cards change size:
+// folded to a title bar they are a fifth of the height they are with every
+// column showing, and a gap that reads as breathing room around a tall card is
+// three empty cards' worth of nothing around a short one.
+function slackFor(h) {
+  return Math.max(GAP_Y, Math.min(GAP_Y * 3, h * 0.3));
 }
 
 // separate pushes a column's cards apart until none of them overlap, keeping
@@ -1603,8 +1781,13 @@ function separate(column) {
 
 // placeCards writes the layout onto the DOM and sizes the canvas to fit, so the
 // page scrolls to the furthest card rather than clipping it.
-function placeCards() {
-  autoLayout();
+//
+// `again` is false after a drag. Dropping a card is not a reason to rearrange
+// the diagram: the automatic layout arranges the free cards around the pinned
+// ones, so recomputing it means moving somebody else's card because this one
+// was moved, and whoever dragged it was looking at the card they dropped.
+function placeCards(again = true) {
+  if (again) autoLayout();
   let maxX = 0;
   let maxY = 0;
   const names = app.schema.tables.map((t) => t.name).concat(app.drafts.map((d) => d.table));
@@ -1667,7 +1850,7 @@ function makeDraggable(card, head, name) {
     card.classList.remove("dragging");
     if (head.hasPointerCapture(e.pointerId)) head.releasePointerCapture(e.pointerId);
     saveLayout();
-    placeCards();
+    placeCards(false);
     drawEdges();
   };
   head.addEventListener("pointerup", end);
@@ -2466,7 +2649,10 @@ function lanes(boxes, from, to) {
 
   const out = [];
   for (let i = 1; i < edges.length; i++) {
-    if (edges[i] - edges[i - 1] > 40) out.push((edges[i - 1] + edges[i]) / 2);
+    // Wide enough for a line and its rounded corners, which is what the gap
+    // between two columns of cards is: narrower than that and a "corridor" is
+    // a line drawn along the side of a card.
+    if (edges[i] - edges[i - 1] > 26) out.push((edges[i - 1] + edges[i]) / 2);
   }
   return out;
 }
@@ -2506,8 +2692,15 @@ function routePoints(x1, y1, x2, y2, boxes, from, to, out1 = 1, out2 = -1) {
   // The routes to try, best first.
   const options = [];
 
-  // Level and unobstructed: one straight line, no turns at all.
-  if (Math.abs(y1 - y2) < 2) options.push([start, finish]);
+  // Level and unobstructed: one straight line, no turns at all. Nothing costed
+  // below can beat it, so it is answered here rather than joining the search —
+  // this is the common case on a diagram laid out in columns, and the search
+  // runs on every frame of every animation.
+  if (Math.abs(y1 - y2) < 2) {
+    const straight = [start, finish];
+    if (isClear(straight, boxes, from, to)) return straight;
+    options.push(straight);
+  }
 
   // Down the middle, then down each corridor between the cards, nearest to the
   // middle first. When the parent is to the left, the corridors are what let
@@ -2516,7 +2709,11 @@ function routePoints(x1, y1, x2, y2, boxes, from, to, out1 = 1, out2 = -1) {
   const corridors = [middle, ...lanes(boxes, from, to)
     .sort((a, b) => Math.abs(a - middle) - Math.abs(b - middle))];
 
-  for (const lane of corridors) {
+  // Only the corridors near the middle are worth proposing. A corridor at the
+  // far end of the page is clear precisely because there is nothing near it,
+  // and a line that goes there and comes back is longer than the diagram is
+  // wide.
+  for (const lane of corridors.slice(0, 8)) {
     options.push([
       start,
       { x: ax, y: y1 },
@@ -2552,9 +2749,30 @@ function routePoints(x1, y1, x2, y2, boxes, from, to, out1 = 1, out2 = -1) {
     }
   }
 
+  // The first route that misses every card is not the best one: the corridors
+  // are tried from the middle outwards, and the middle of two cards at opposite
+  // corners is nowhere near either of them. So the clear routes are costed and
+  // the shortest wins, with a turn priced at a short length — three corners to
+  // save twenty pixels reads as worse, not better.
+  let best = null;
+  let bestCost = Infinity;
   for (const points of options) {
-    if (isClear(points, boxes, from, to)) return points;
+    if (!isClear(points, boxes, from, to)) continue;
+
+    let cost = 0;
+    for (let i = 1; i < points.length; i++) {
+      cost += Math.abs(points[i].x - points[i - 1].x) +
+        Math.abs(points[i].y - points[i - 1].y);
+    }
+    cost += points.length * 24;
+
+    if (cost < bestCost) {
+      bestCost = cost;
+      best = points;
+    }
   }
+  if (best) return best;
+
   // Everything was blocked, which means the cards are stacked on top of each
   // other. The last route is no worse than the rest.
   return options[options.length - 1] || [start, finish];
