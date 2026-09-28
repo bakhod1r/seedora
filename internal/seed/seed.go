@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bakhod1r/synth"
 
@@ -609,14 +610,18 @@ func clampText(v any, limit int) any {
 	if !ok || limit <= 0 {
 		return v
 	}
-	if len(s) <= limit {
+	// limit is characters, as varchar(n) counts them, not bytes.
+	if len(s) <= limit || utf8.RuneCountInString(s) <= limit {
 		return s
 	}
-	runes := []rune(s)
-	for len(runes) > 0 && len(string(runes)) > limit {
-		runes = runes[:len(runes)-1]
+	n := 0
+	for i := range s {
+		if n == limit {
+			return s[:i]
+		}
+		n++
 	}
-	return string(runes)
+	return s
 }
 
 // writableColumns is the column list a bulk write uses: catalog order, minus
