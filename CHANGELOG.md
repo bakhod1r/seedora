@@ -10,6 +10,35 @@ it.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-28
+
+### Changed
+
+- **The UI asks for a per-launch access token.** `seedora ui` prints a link
+  carrying `?token=`; opening it sets an HttpOnly, SameSite=Strict cookie.
+  Every API request without the cookie or an `Authorization: Bearer` header
+  gets 401, so `--host 0.0.0.0` no longer hands truncate and DDL to anyone on
+  the network. What to do: open the printed link instead of typing the bare
+  address; a bookmarked address shows a locked page until you do.
+
+### Fixed
+
+- **Postgres tables with the same name in two schemas no longer merge.** The
+  table kept is the one an unqualified name resolves to (`search_path`); its
+  columns, keys and constraints no longer pick up the other schema's.
+- **MySQL passwords are hidden.** A scheme-less DSN (`user:pass@tcp(host)/db`)
+  showed its password in the UI and was written to disk with
+  `keep_password: false`. Query-parameter passwords are stripped too.
+- **Preview and Connect wait for a running seed.** They used the connection
+  the run held, and their ROLLBACK could break the seed's transaction.
+- **Text limits count characters, not bytes,** so multi-byte text is no longer
+  cut mid-character or rejected by `varchar(n)`.
+
+### Security
+
+- grpc v1.83.2 (GO-2026-6348), aws-sdk-go-v2 s3 v1.113.4 and eventstream
+  v1.7.20 (GO-2026-5764).
+
 ## [0.7.0] — 2026-08-22
 
 ### Changed
@@ -443,7 +472,8 @@ First public version.
   handling, and a fixed `--seed` for reproducible runs.
 - The production-target guard.
 
-[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/bakhod1r/seedora/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bakhod1r/seedora/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/bakhod1r/seedora/releases/tag/v0.6.1
 [0.6.0]: https://github.com/bakhod1r/seedora/releases/tag/v0.6.0
