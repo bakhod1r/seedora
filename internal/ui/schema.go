@@ -104,6 +104,12 @@ func (s *Server) handleSchemaApply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	release, err := s.useConn()
+	if err != nil {
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
+	defer release()
 	if err := applyStatements(r.Context(), d, stmts); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -233,7 +239,13 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	release, err := s.useConn()
+	if err != nil {
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
 	migrations, err := d.History(r.Context())
+	release()
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return

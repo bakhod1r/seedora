@@ -46,7 +46,13 @@ type Server struct {
 	// uses to decide between "Save" and "Save as seedora.yaml".
 	loaded  bool
 	running bool
-	last    *seed.Result
+	// conn serialises use of the driver. A Postgres driver is one *pgx.Conn,
+	// which is not safe for concurrent use: a Preview's ROLLBACK sent on it
+	// while a run is inside its transaction rolls the run back. A run holds
+	// conn for its whole length; anything else that talks to the database
+	// takes it through useConn and is refused while a run is in flight.
+	conn sync.Mutex
+	last *seed.Result
 	// run is the seeding run in flight, or the last one to finish. The page
 	// watches it over SSE rather than holding a request open for its duration.
 	run *run
@@ -55,6 +61,30 @@ type Server struct {
 // New returns a server. A nil driver means the page opens on the connect screen.
 func New(cfg *config.Config, d db.Driver, dsn string, s *model.Schema, p *plan.Plan, loaded bool) *Server {
 	return &Server{cfg: cfg, driver: d, dsn: dsn, schema: s, plan: p, loaded: loaded}
+}
+
+// useConn takes the connection for one request, or reports errRunning while a
+// seeding run holds it. Refusing rather than waiting keeps the page responsive
+// during a long run.
+func (s *Server) useConn() (release func(), err error) {
+	s.mu.Lock()
+	running := s.running
+	s.mu.Unlock()
+	if running {
+		return nil, errRunning
+	}
+	if s.conn.TryLock() {
+		return s.conn.Unlock, nil
+	}
+	// Held: either a run started since the check, or another short request.
+	s.mu.Lock()
+	running = s.running
+	s.mu.Unlock()
+	if running {
+		return nil, errRunning
+	}
+	s.conn.Lock()
+	return s.conn.Unlock, nil
 }
 
 // Handler builds the HTTP routes.
@@ -301,6 +331,14 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// The lock is held only long enough to swap the session over, then released
 	// before touching the disk — the store write is slow enough that holding a
 	// lock across it would block every other request for no reason.
+	// Closing the driver a run is using would fail the run halfway.
+	release, err := s.useConn()
+	if err != nil {
+		d.Close(ctx)
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
+	defer release()
 	s.mu.Lock()
 	if s.driver != nil {
 		_ = s.driver.Close(ctx)
@@ -399,7 +437,13 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	release, err := s.useConn()
+	if err != nil {
+		writeErr(w, http.StatusConflict, err)
+		return
+	}
 	rows, cols, err := seed.Preview(r.Context(), d, sc, p, req.Table, req.Rows, s.cfg.Locale, req.Nonce)
+	release()
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return

@@ -158,6 +158,8 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithoutCancel(r.Context())
 
 	go func() {
+		s.conn.Lock()
+		defer s.conn.Unlock()
 		opts.Progress = func(pr seed.Progress) {
 			active.emit("progress", progressData{
 				Table:   pr.Table,
