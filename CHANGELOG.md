@@ -10,6 +10,17 @@ it.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-09-28
+
+### Fixed
+
+- **A self-reference loop stays in its corridor.** It grew past the gap
+  between columns and ran under the next column's card.
+
+### Security
+
+- apache/thrift v0.24.0.
+
 ## [0.8.0] — 2026-09-28
 
 ### Changed
@@ -475,7 +486,8 @@ First public version.
   handling, and a fixed `--seed` for reproducible runs.
 - The production-target guard.
 
-[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/bakhod1r/seedora/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/bakhod1r/seedora/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bakhod1r/seedora/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/bakhod1r/seedora/releases/tag/v0.6.1
