@@ -198,7 +198,8 @@ SELECT n.nspname,
        (a.atthasdef OR a.attidentity <> '')      AS has_default,
        a.attgenerated <> ''                      AS generated,
        t.typtype = 'e'                           AS is_enum,
-       a.attnum
+       a.attnum,
+       pg_table_is_visible(c.oid)                AS visible
 FROM pg_attribute a
 JOIN pg_class c      ON c.oid = a.attrelid
 JOIN pg_namespace n  ON n.oid = c.relnamespace
@@ -219,22 +220,30 @@ ORDER BY n.nspname, c.relname, a.attnum`
 	}
 	defer rows.Close()
 
-	byName := map[string]*model.Table{}
+	// Tables are keyed by name everywhere after this (the plan, foreign keys,
+	// the UI), so two schemas with a table of the same name cannot both be
+	// kept: their columns and constraints would merge into one table that does
+	// not exist. The one kept is the one an unqualified name resolves to — the
+	// table visible on the search_path — or, if neither is, the first by
+	// schema name. The others are left out rather than corrupted.
+	type colRow struct {
+		ns, table string
+		visible   bool
+		col       *model.Column
+	}
+	var all []colRow
+	winner := map[string]string{} // table name -> schema kept
+	winnerVisible := map[string]bool{}
 	for rows.Next() {
 		var (
 			ns, table, col, typ, native             string
 			nullable, hasDefault, generated, isEnum bool
 			attnum                                  int16
+			visible                                 bool
 		)
 		if err := rows.Scan(&ns, &table, &col, &typ, &native,
-			&nullable, &hasDefault, &generated, &isEnum, &attnum); err != nil {
+			&nullable, &hasDefault, &generated, &isEnum, &attnum, &visible); err != nil {
 			return nil, err
-		}
-		t, ok := byName[table]
-		if !ok {
-			t = &model.Table{Schema: ns, Name: table}
-			byName[table] = t
-			s.Tables = append(s.Tables, t)
 		}
 		c := &model.Column{
 			Name:       col,
@@ -248,9 +257,38 @@ ORDER BY n.nspname, c.relname, a.attnum`
 			c.EnumType = typ
 		}
 		c.MaxLen, c.Precision, c.Scale = decorations(native)
-		t.Columns = append(t.Columns, c)
+		all = append(all, colRow{ns: ns, table: table, visible: visible, col: c})
+		if cur, ok := winner[table]; !ok || (visible && !winnerVisible[table] && cur != ns) {
+			winner[table], winnerVisible[table] = ns, visible
+		}
 	}
-	return byName, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	byName := map[string]*model.Table{}
+	for _, r := range all {
+		if winner[r.table] != r.ns {
+			continue
+		}
+		t, ok := byName[r.table]
+		if !ok {
+			t = &model.Table{Schema: r.ns, Name: r.table}
+			byName[r.table] = t
+			s.Tables = append(s.Tables, t)
+		}
+		t.Columns = append(t.Columns, r.col)
+	}
+	return byName, nil
+}
+
+// owned returns the table kept under name if it lives in schema ns. Catalog
+// rows for a same-named table in another schema must not reach it.
+func owned(byName map[string]*model.Table, ns, name string) *model.Table {
+	if t := byName[name]; t != nil && t.Schema == ns {
+		return t
+	}
+	return nil
 }
 
 // loadConstraints marks primary keys, single-column unique constraints, and
@@ -260,8 +298,10 @@ ORDER BY n.nspname, c.relname, a.attnum`
 func (d *Driver) loadConstraints(ctx context.Context, byName map[string]*model.Table) error {
 	const q = `
 SELECT con.contype,
+       n.nspname                                        AS table_schema,
        c.relname                                        AS table_name,
        a.attname                                        AS column_name,
+       COALESCE(fn.nspname, '')                         AS ref_schema,
        COALESCE(fc.relname, '')                         AS ref_table,
        COALESCE(fa.attname, '')                         AS ref_column,
        cardinality(con.conkey)                          AS key_width
@@ -271,6 +311,7 @@ JOIN pg_namespace n    ON n.oid = c.relnamespace
 JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
 JOIN pg_attribute a    ON a.attrelid = con.conrelid AND a.attnum = k.attnum
 LEFT JOIN pg_class fc  ON fc.oid = con.confrelid
+LEFT JOIN pg_namespace fn ON fn.oid = fc.relnamespace
 LEFT JOIN unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord)
        ON fk.ord = k.ord
 LEFT JOIN pg_attribute fa
@@ -287,15 +328,15 @@ ORDER BY c.relname, con.conname, k.ord`
 
 	for rows.Next() {
 		var (
-			ctype                           string
+			ctype, ns, refNs                string
 			table, column, refTable, refCol string
 			width                           int32
 		)
-		if err := rows.Scan(&ctype, &table, &column, &refTable, &refCol, &width); err != nil {
+		if err := rows.Scan(&ctype, &ns, &table, &column, &refNs, &refTable, &refCol, &width); err != nil {
 			return err
 		}
-		t, ok := byName[table]
-		if !ok {
+		t := owned(byName, ns, table)
+		if t == nil {
 			continue
 		}
 		c := t.Column(column)
@@ -316,7 +357,9 @@ ORDER BY c.relname, con.conname, k.ord`
 			// A composite foreign key cannot be satisfied column by column, so
 			// only single-column keys become a Ref. Composite keys stay
 			// unmarked and the user maps them explicitly.
-			if width == 1 && refTable != "" {
+			// A key into a same-named table that was left out would resolve
+			// by name to the wrong one; it stays unmarked for the user to map.
+			if width == 1 && refTable != "" && owned(byName, refNs, refTable) != nil {
 				c.FK = &model.Ref{Table: refTable, Column: refCol}
 			}
 		}
@@ -343,7 +386,8 @@ ORDER BY c.relname, con.conname, k.ord`
 // and "bob" are two values and one key.
 func (d *Driver) loadUniqueIndexes(ctx context.Context, byName map[string]*model.Table) error {
 	const q = `
-SELECT c.relname                                        AS table_name,
+SELECT n.nspname                                        AS table_schema,
+       c.relname                                        AS table_name,
        pg_get_indexdef(i.indexrelid)                    AS indexdef,
        COALESCE(pg_get_expr(i.indpred, i.indrelid), '') AS predicate
 FROM pg_index i
@@ -365,12 +409,12 @@ WHERE i.indisunique
 	predicates := map[string][]string{}
 
 	for rows.Next() {
-		var table, def, predicate string
-		if err := rows.Scan(&table, &def, &predicate); err != nil {
+		var ns, table, def, predicate string
+		if err := rows.Scan(&ns, &table, &def, &predicate); err != nil {
 			return err
 		}
-		t, ok := byName[table]
-		if !ok {
+		t := owned(byName, ns, table)
+		if t == nil {
 			continue
 		}
 		if predicate != "" {
@@ -418,7 +462,8 @@ WHERE i.indisunique
 // is reported at planning time — before a row is generated.
 func (d *Driver) loadChecks(ctx context.Context, byName map[string]*model.Table) error {
 	const q = `
-SELECT c.relname                             AS table_name,
+SELECT n.nspname                             AS table_schema,
+       c.relname                             AS table_name,
        con.conname                           AS name,
        pg_get_expr(con.conbin, con.conrelid) AS expr,
        COALESCE(
@@ -440,13 +485,13 @@ ORDER BY c.relname, con.conname`
 	defer rows.Close()
 
 	for rows.Next() {
-		var table, name, expr string
+		var ns, table, name, expr string
 		var cols []string
-		if err := rows.Scan(&table, &name, &expr, &cols); err != nil {
+		if err := rows.Scan(&ns, &table, &name, &expr, &cols); err != nil {
 			return err
 		}
-		t, ok := byName[table]
-		if !ok {
+		t := owned(byName, ns, table)
+		if t == nil {
 			continue
 		}
 		// A NOT NULL spelled as a check adds nothing the column does not
@@ -472,7 +517,7 @@ func isNotNullCheck(expr string) bool {
 // itself a strong hint that it is empty.
 func (d *Driver) loadCounts(ctx context.Context, s *model.Schema) error {
 	const q = `
-SELECT c.relname, GREATEST(c.reltuples, 0)::bigint
+SELECT n.nspname, c.relname, GREATEST(c.reltuples, 0)::bigint
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p')
@@ -484,18 +529,18 @@ WHERE c.relkind IN ('r', 'p')
 	defer rows.Close()
 	counts := map[string]int64{}
 	for rows.Next() {
-		var name string
+		var ns, name string
 		var n int64
-		if err := rows.Scan(&name, &n); err != nil {
+		if err := rows.Scan(&ns, &name, &n); err != nil {
 			return err
 		}
-		counts[name] = n
+		counts[ns+"\x00"+name] = n
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, t := range s.Tables {
-		t.ExistingRows = counts[t.Name]
+		t.ExistingRows = counts[t.Schema+"\x00"+t.Name]
 	}
 	return nil
 }
