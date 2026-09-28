@@ -10,6 +10,20 @@ it.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-28
+
+### Added
+
+- **Stop a running seed.** A Stop button sits beside Seed while a run is in
+  flight (`POST /api/seed/cancel`). The run's transaction is rolled back and
+  the page reports "Run stopped".
+
+### Fixed
+
+- **MySQL unique columns respect case-insensitive collations.** Under a `_ci`
+  collation (the default) MySQL treats "Bob" and "bob" as one value; the
+  seeder now does too, instead of generating both and failing on the second.
+
 ## [0.8.1] — 2026-09-28
 
 ### Fixed
@@ -486,7 +500,8 @@ First public version.
   handling, and a fixed `--seed` for reproducible runs.
 - The production-target guard.
 
-[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/bakhod1r/seedora/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/bakhod1r/seedora/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/bakhod1r/seedora/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/bakhod1r/seedora/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bakhod1r/seedora/compare/v0.6.1...v0.7.0

@@ -160,7 +160,6 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-
 	go func() {
 		defer cancel()
 		s.conn.Lock()

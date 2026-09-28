@@ -221,7 +221,7 @@ func (d *Driver) loadColumns(ctx context.Context, s *model.Schema) (map[string]*
 	const q = `
 SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE,
        c.COLUMN_DEFAULT, c.EXTRA, c.CHARACTER_MAXIMUM_LENGTH,
-       c.NUMERIC_PRECISION, c.NUMERIC_SCALE
+       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, COALESCE(c.COLLATION_NAME, '')
 FROM information_schema.COLUMNS c
 JOIN information_schema.TABLES t
   ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
@@ -237,12 +237,12 @@ ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`
 	byName := map[string]*model.Table{}
 	for rows.Next() {
 		var (
-			table, name, dataType, colType, nullable, extra string
-			def                                             sql.NullString
-			maxLen, precision, scale                        sql.NullInt64
+			table, name, dataType, colType, nullable, extra, collation string
+			def                                                        sql.NullString
+			maxLen, precision, scale                                   sql.NullInt64
 		)
 		if err := rows.Scan(&table, &name, &dataType, &colType, &nullable, &def,
-			&extra, &maxLen, &precision, &scale); err != nil {
+			&extra, &maxLen, &precision, &scale, &collation); err != nil {
 			return nil, err
 		}
 
@@ -271,6 +271,10 @@ ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`
 			MaxLen:    int(maxLen.Int64),
 			Precision: int(precision.Int64),
 			Scale:     int(scale.Int64),
+			// A case-insensitive collation (utf8mb4_0900_ai_ci, the default)
+			// compares "Bob" and "bob" as equal, so a unique index on the
+			// column is over the folded value.
+			UniqueFold: strings.Contains(strings.ToLower(collation), "_ci"),
 		}
 		// MySQL has no boolean: BOOL is an alias for TINYINT(1), and that
 		// spelling is the only signal that a 0/1 column means true/false.
