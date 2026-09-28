@@ -26,8 +26,12 @@ type Config struct {
 	// DSNFile reads the DSN from a path instead, for /run/secrets mounts.
 	DSNFile string `env:"SEEDORA_DSN_FILE" desc:"file to read the DSN from"`
 
-	Port int    `env:"SEEDORA_PORT" default:"7777" desc:"UI port"`
-	Host string `env:"SEEDORA_HOST" default:"127.0.0.1" desc:"UI bind address"`
+	Port int `env:"SEEDORA_PORT" default:"7777" desc:"UI port"`
+	// Token is the per-launch secret the UI and API require. The launcher
+	// generates it; it is never read from the environment or a file. Empty
+	// disables the check (tests and embedders only).
+	Token string `env:"-"`
+	Host  string `env:"SEEDORA_HOST" default:"127.0.0.1" desc:"UI bind address"`
 
 	ConfigPath string `env:"SEEDORA_CONFIG" default:"seedora.yaml" desc:"mapping file"`
 	// Migrations is the project's migration directory. Seedora reads it to

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -61,13 +63,21 @@ func cmdUI(ctx context.Context, args []string) error {
 		driver, dsn, schema = d, resolved, s
 	}
 
+	// A fresh secret every launch: the printed link carries it, and without it
+	// nothing on this port answers — not another machine when bound to
+	// 0.0.0.0, not another user on this one.
+	token, err := newToken()
+	if err != nil {
+		return err
+	}
+	cfg.Token = token
 	srv := ui.New(cfg, driver, dsn, schema, p, loaded)
 
 	ln, err := net.Listen("tcp", cfg.Addr())
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.Addr(), err)
 	}
-	url := "http://" + ln.Addr().String()
+	url := "http://" + ln.Addr().String() + "/?token=" + token
 
 	httpSrv := &http.Server{
 		Handler: srv.Handler(),
@@ -77,6 +87,7 @@ func cmdUI(ctx context.Context, args []string) error {
 	}
 
 	fmt.Printf("Seedora is at %s\n", url)
+	fmt.Println("The link carries this launch's access token; it changes every run.")
 	if driver != nil {
 		fmt.Printf("Connected to %s · %s\n", driver.Name(), config.Redacted(dsn))
 	} else {
@@ -480,4 +491,13 @@ func open(url string) {
 		cmd = exec.Command("xdg-open", url)
 	}
 	_ = cmd.Start()
+}
+
+// newToken returns a random URL-safe access token.
+func newToken() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }

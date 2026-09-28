@@ -123,7 +123,7 @@ func (s *Server) Handler() http.Handler {
 	// schema and GET /api/connections carries the DSNs of every database this
 	// machine has connected to, so a read is worth as much to another site as
 	// a write.
-	return guard(s.cfg.Host, mux)
+	return guard(s.cfg.Host, requireToken(s.cfg.Token, mux))
 }
 
 // noCache makes the browser revalidate the page assets on every load. They are
@@ -139,6 +139,7 @@ func noCache(h http.Handler) http.Handler {
 var (
 	errNotConnected = errors.New("not connected")
 	errRunning      = errors.New("a run is already in progress")
+	errUnauthorized = errors.New("missing or wrong access token: open Seedora from the link it printed")
 	errNoRun        = errors.New("no run has been started")
 	errNoStreaming  = errors.New("this server cannot stream")
 )
