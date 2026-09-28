@@ -331,6 +331,8 @@ code {
 .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .btn-primary:disabled { background: var(--accent); border-color: var(--accent); }
 
+.btn-danger { background: var(--danger-soft); border-color: var(--danger-line); color: var(--fg); }
+.btn-danger:hover { background: var(--danger-soft); border-color: var(--danger); }
 .btn-quiet { background: transparent; border-color: transparent; color: var(--fg-muted); }
 .btn-quiet:hover { background: var(--surface-2); border-color: var(--border); color: var(--fg); }
 
@@ -1248,6 +1250,8 @@ dialog[open] { animation: pop var(--normal) var(--ease); }
 .toast.good .dot { background: var(--accent); }
 .toast.bad { border-color: var(--danger-line); color: var(--danger); }
 .toast.bad .dot { background: var(--danger); }
+.toast.warn { border-color: var(--warn-line); }
+.toast.warn .dot { background: var(--warn); }
 .toast .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-subtle); flex: none; }
 
 .busy {

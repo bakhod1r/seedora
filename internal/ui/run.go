@@ -46,6 +46,9 @@ type run struct {
 	history []runEvent
 	subs    map[chan runEvent]struct{}
 	done    bool
+	// cancel stops the run's context. The run notices at its next database
+	// call, rolls its transaction back, and reports "cancelled".
+	cancel context.CancelFunc
 }
 
 func newRun() *run {
@@ -64,7 +67,7 @@ func (r *run) emit(name string, data any) {
 	}
 	ev := runEvent{Name: name, Data: data}
 	r.history = append(r.history, ev)
-	if name == "done" || name == "failed" {
+	if name == "done" || name == "failed" || name == "cancelled" {
 		r.done = true
 	}
 	for ch := range r.subs {
@@ -137,7 +140,12 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, errRunning)
 		return
 	}
+	// The run outlives the request that started it, so it gets a context of
+	// its own — cancelling it with the request would kill the run the moment
+	// the browser got its reply. Stop cancels it instead.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
 	active := newRun()
+	active.cancel = cancel
 	s.run = active
 	s.running = true
 	d, sc, p := s.driver, s.schema, s.plan
@@ -152,12 +160,9 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	// The run outlives the request that started it, so it gets a context of its
-	// own — cancelling it with the request would kill the run the moment the
-	// browser got its reply.
-	ctx := context.WithoutCancel(r.Context())
 
 	go func() {
+		defer cancel()
 		s.conn.Lock()
 		defer s.conn.Unlock()
 		opts.Progress = func(pr seed.Progress) {
@@ -187,13 +192,30 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 
-		if err != nil {
+		switch {
+		case err != nil && ctx.Err() != nil:
+			active.emit("cancelled", map[string]string{"error": "run stopped"})
+		case err != nil:
 			active.emit("failed", map[string]string{"error": err.Error()})
-			return
+		default:
+			active.emit("done", res)
 		}
-		active.emit("done", res)
 	}()
 
+	writeJSON(w, http.StatusAccepted, map[string]string{"run_id": active.id})
+}
+
+// handleSeedCancel stops the run in flight. It returns once the stop is asked
+// for, not once the run has ended; the stream reports "cancelled" when it has.
+func (s *Server) handleSeedCancel(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	active := s.run
+	s.mu.Unlock()
+	if active == nil || active.finished() {
+		writeErr(w, http.StatusNotFound, errNoRun)
+		return
+	}
+	active.cancel()
 	writeJSON(w, http.StatusAccepted, map[string]string{"run_id": active.id})
 }
 

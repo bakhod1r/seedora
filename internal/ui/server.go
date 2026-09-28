@@ -115,6 +115,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/history", s.handleHistory)
 	mux.HandleFunc("POST /api/seed", s.handleSeed)
 	mux.HandleFunc("GET /api/seed/events", s.handleSeedEvents)
+	mux.HandleFunc("POST /api/seed/cancel", s.handleSeedCancel)
 	mux.HandleFunc("POST /api/save", s.handleSave)
 	mux.HandleFunc("GET /api/export", s.handleExport)
 	mux.HandleFunc("POST /api/import", s.handleImport)

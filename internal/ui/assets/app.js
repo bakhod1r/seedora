@@ -4565,6 +4565,14 @@ function watchRun(runID, dry) {
     toast(JSON.parse(e.data).error, "bad");
   });
 
+  source.addEventListener("cancelled", () => {
+    source.close();
+    app.running = false;
+    setRunningUI(false);
+    clearTableProgress();
+    toast("Run stopped. Its transaction was rolled back.", "warn");
+  });
+
   source.onerror = () => {
     // EventSource reconnects on its own, and the server replays the run from the
     // start, so a dropped connection is not worth reporting. A run that has
@@ -4599,6 +4607,10 @@ function setRunningUI(on, dry) {
   const go = $("btn-seed");
   go.disabled = on;
   go.textContent = on ? (dry ? "Validating…" : "Seeding…") : "Seed…";
+  const stop = $("btn-stop");
+  stop.hidden = !on;
+  stop.disabled = false;
+  stop.textContent = "Stop";
   // Undo and redo re-render the diagram, which destroys the progress bars a run
   // is drawing into. The run itself is safe — the server took its copy of the
   // plan before it started — but the display is not.
@@ -4637,6 +4649,21 @@ function clearTableProgress() {
 }
 
 $("btn-seed").addEventListener("click", openSeedDialog);
+
+// Stop asks the server to cancel the run; the stream's "cancelled" event is
+// what resets the page, so a stop that loses the race to "done" is harmless.
+$("btn-stop").addEventListener("click", async () => {
+  const stop = $("btn-stop");
+  stop.disabled = true;
+  stop.textContent = "Stopping…";
+  try {
+    await api("POST", "/api/seed/cancel");
+  } catch (e) {
+    stop.disabled = false;
+    stop.textContent = "Stop";
+    toast(e.message, "bad");
+  }
+});
 $("btn-undo").addEventListener("click", undo);
 $("btn-redo").addEventListener("click", redo);
 

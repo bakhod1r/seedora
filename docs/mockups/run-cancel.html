@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seedora stop run</title>
+<style>
+:root, :root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:#0d0f12; --bg-sunken:#090a0c; --surface:#15181d; --surface-2:#1c2027; --surface-3:#242931;
+  --border:#262b33; --border-strong:#333a45;
+  --fg:#e8eaee; --fg-muted:#9aa3b0; --fg-subtle:#6b7480;
+  --accent:#3fa06a; --accent-hover:#4bb87a; --accent-fg:#fff; --accent-soft:rgba(63,160,106,.14); --accent-line:rgba(63,160,106,.4);
+  --warn:#d1a038; --warn-soft:rgba(209,160,56,.13); --warn-line:rgba(209,160,56,.42);
+  --danger:#d2564c; --danger-soft:rgba(210,86,76,.13); --danger-line:rgba(210,86,76,.42);
+  --link:#5b9bd8;
+  --shadow-2:0 4px 12px rgba(0,0,0,.45);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg:#f6f7f9; --bg-sunken:#eceef2; --surface:#fff; --surface-2:#f2f4f7; --surface-3:#e7eaef;
+  --border:#dfe3e9; --border-strong:#c3cad4; --fg:#16191e; --fg-muted:#5b6472; --fg-subtle:#8a93a0;
+  --accent:#2f8a57; --accent-hover:#277a4c; --accent-soft:rgba(47,138,87,.1); --accent-line:rgba(47,138,87,.35);
+  --warn:#a87a14; --warn-soft:rgba(168,122,20,.1); --warn-line:rgba(168,122,20,.35);
+  --danger:#b8433a; --danger-soft:rgba(184,67,58,.1); --danger-line:rgba(184,67,58,.35);
+  --link:#2f6fb0; --shadow-2:0 4px 12px rgba(0,0,0,.08);
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg);
+  font:0.8125rem/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+code, .mono { font-family: ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace; }
+header.top { display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--border); background:var(--surface); flex-wrap:wrap; }
+header.top h1 { font-size:0.875rem; margin:0; font-weight:600; }
+.tabs { display:flex; gap:4px; flex-wrap:wrap; }
+.tab { background:transparent; border:1px solid var(--border); color:var(--fg-muted); border-radius:999px; padding:4px 12px; cursor:pointer; font:inherit; }
+.tab[aria-selected="true"] { background:var(--accent-soft); color:var(--fg); border-color:var(--accent-line); }
+.tab .rec { color:var(--accent); font-size:0.6875rem; margin-left:4px; }
+.spacer { flex:1; }
+.theme { background:var(--surface-2); border:1px solid var(--border); color:var(--fg); border-radius:5px; padding:4px 8px; cursor:pointer; font:inherit; }
+main { max-width:960px; margin:0 auto; padding:24px 16px 48px; }
+.pros { font-size:0.75rem; color:var(--fg-muted); margin:0 0 16px; }
+.pros b { color:var(--fg); }
+.stage { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+@media (max-width: 760px) { .stage { grid-template-columns: 1fr; } }
+.panel { background:var(--surface); border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+.panel h3 { margin:0; padding:8px 12px; font-size:0.6875rem; letter-spacing:.06em; text-transform:uppercase; color:var(--fg-subtle); border-bottom:1px solid var(--border); background:var(--surface-2); }
+.term { background:var(--bg-sunken); padding:12px; font-size:0.75rem; white-space:pre-wrap; word-break:break-all; min-height:180px; margin:0; }
+.term .ok { color:var(--accent); } .term .dim { color:var(--fg-subtle); } .term .u { color:var(--link); text-decoration:underline; cursor:pointer; }
+.browser { min-height:260px; display:flex; flex-direction:column; }
+.addr { display:flex; gap:6px; padding:8px; border-bottom:1px solid var(--border); background:var(--surface-2); }
+.addr input { flex:1; min-width:0; background:var(--bg-sunken); border:1px solid var(--border); color:var(--fg); border-radius:5px; padding:4px 8px; font:0.75rem ui-monospace,Menlo,monospace; }
+.view { flex:1; display:flex; align-items:center; justify-content:center; padding:20px; }
+.card { max-width:340px; width:100%; text-align:center; }
+.card h2 { font-size:1.0625rem; margin:8px 0 4px; }
+.card p { color:var(--fg-muted); margin:0 0 12px; }
+.glyph { width:40px; height:40px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; font-size:1.1rem; }
+.glyph.lock { background:var(--warn-soft); color:var(--warn); border:1px solid var(--warn-line); }
+.glyph.bad { background:var(--danger-soft); color:var(--danger); border:1px solid var(--danger-line); }
+.glyph.load { background:var(--surface-3); color:var(--fg-muted); animation:spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .glyph.load { animation:none; } }
+.field { display:flex; gap:6px; margin-top:8px; }
+.field input { flex:1; min-width:0; background:var(--bg-sunken); border:1px solid var(--border-strong); color:var(--fg); border-radius:8px; padding:8px 10px; font:0.8125rem ui-monospace,Menlo,monospace; }
+.field input:focus-visible, button:focus-visible, .tab:focus-visible { outline:2px solid var(--accent-line); outline-offset:1px; }
+.btn { background:var(--accent); color:var(--accent-fg); border:0; border-radius:8px; padding:8px 14px; cursor:pointer; font:inherit; font-weight:600; }
+.btn:hover { background:var(--accent-hover); }
+.btn.ghost { background:transparent; color:var(--fg); border:1px solid var(--border-strong); }
+.err { color:var(--danger); font-size:0.75rem; min-height:1.2em; margin-top:6px; }
+.app { width:100%; align-self:stretch; display:flex; flex-direction:column; gap:8px; }
+.app .bar { display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--surface-2); border:1px solid var(--border); border-radius:8px; }
+.dot { width:8px; height:8px; border-radius:999px; background:var(--accent); }
+.pill { font-size:0.6875rem; border-radius:999px; padding:1px 8px; border:1px solid var(--border); color:var(--fg-muted); }
+.pill.warn { color:var(--warn); border-color:var(--warn-line); background:var(--warn-soft); }
+.skel { height:34px; border-radius:8px; background:var(--surface-2); border:1px solid var(--border); }
+.controls { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 0; }
+.small { font-size:0.75rem; color:var(--fg-subtle); }
+
+.btn { background:var(--surface-2); border:1px solid var(--border); color:var(--fg); border-radius:6px; padding:5px 12px; font:inherit; cursor:pointer; }
+.btn:disabled { opacity:.6; cursor:default; }
+.btn-primary { background:var(--accent); border-color:var(--accent); color:var(--accent-fg); }
+.btn-danger { background:var(--danger-soft); border-color:var(--danger-line); color:var(--fg); }
+.bar { display:flex; gap:8px; align-items:center; padding:10px 12px; background:var(--surface); border:1px solid var(--border); border-radius:8px; }
+.board { position:relative; margin-top:12px; height:220px; background:var(--bg-sunken); border:1px solid var(--border); border-radius:8px; padding:16px; display:flex; gap:16px; }
+.card { width:180px; background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px; height:fit-content; }
+.progress { height:6px; background:var(--surface-3); border-radius:3px; margin-top:8px; overflow:hidden; }
+.fill { height:100%; background:var(--accent); width:40%; transition:width .3s; }
+.dock { position:absolute; right:12px; bottom:12px; background:var(--surface); border:1px solid var(--border-strong); border-radius:8px; padding:10px 12px; box-shadow:var(--shadow-2); width:260px; }
+.pop { position:absolute; top:44px; right:12px; background:var(--surface); border:1px solid var(--border-strong); border-radius:8px; padding:12px; box-shadow:var(--shadow-2); width:260px; }
+.note { color:var(--fg-muted); margin:8px 0 16px; }
+.toast { margin-top:8px; padding:8px 12px; border-radius:6px; background:var(--warn-soft); border:1px solid var(--warn-line); display:none; }
+.hidden { display:none; }
+.v { display:none; } .v.on { display:block; }
+</style></head><body>
+<header class="top"><h1>Stop a running seed</h1>
+<div class="tabs" role="tablist">
+<button class="tab" aria-selected="true" data-v="a">A · Stop beside Seed <span class="rec">recommended</span></button>
+<button class="tab" aria-selected="false" data-v="b">B · Progress dock</button>
+<button class="tab" aria-selected="false" data-v="c">C · Confirm popover</button></div>
+<span class="spacer"></span><button class="theme" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'">Theme</button></header>
+<main>
+<section class="v on" id="v-a"><p class="note">Seed turns into its status; a Stop button appears next to it for the length of the run. Good: one click, where the eye already is. Bad: a mis-click stops a run (it rolls back, so nothing is lost but time).</p>
+<div class="bar"><strong>seedora</strong><span class="spacer"></span><button class="btn">Save</button>
+<button class="btn btn-primary" data-seed>Seed…</button><button class="btn btn-danger hidden" data-stop>Stop</button></div>
+<div class="board"><div class="card">users<div class="progress"><div class="fill"></div></div></div><div class="card">orders<div class="progress"><div class="fill" style="width:10%"></div></div></div></div>
+<div class="toast" data-toast>Run stopped. Nothing was written — the transaction was rolled back.</div></section>
+<section class="v" id="v-b"><p class="note">A dock bottom-right carries overall progress and Stop. Good: room for totals and ETA. Bad: one more floating panel over the diagram.</p>
+<div class="bar"><strong>seedora</strong><span class="spacer"></span><button class="btn btn-primary" data-seed>Seed…</button></div>
+<div class="board"><div class="card">users<div class="progress"><div class="fill"></div></div></div>
+<div class="dock hidden" data-dock><div>Seeding · 2 of 5 tables</div><div class="progress"><div class="fill"></div></div><div style="margin-top:8px;text-align:right"><button class="btn btn-danger" data-stop>Stop run</button></div></div></div>
+<div class="toast" data-toast>Run stopped. Nothing was written.</div></section>
+<section class="v" id="v-c"><p class="note">Clicking the running Seed button asks first. Good: no accidental stops. Bad: Stop is hidden behind a button that looks disabled.</p>
+<div class="bar" style="position:relative"><strong>seedora</strong><span class="spacer"></span><button class="btn btn-primary" data-seed>Seed…</button>
+<div class="pop hidden" data-pop>Stop this run? It rolls back; nothing is written.<div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end"><button class="btn" data-keep>Keep going</button><button class="btn btn-danger" data-stop>Stop</button></div></div></div>
+<div class="board"><div class="card">users<div class="progress"><div class="fill"></div></div></div></div>
+<div class="toast" data-toast>Run stopped.</div></section>
+</main>
+<script>
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.setAttribute('aria-selected',x===t));document.querySelectorAll('.v').forEach(v=>v.classList.toggle('on',v.id==='v-'+t.dataset.v));});
+document.querySelectorAll('.v').forEach(v=>{
+ const seed=v.querySelector('[data-seed]'),stop=v.querySelector('[data-stop]'),toast=v.querySelector('[data-toast]'),dock=v.querySelector('[data-dock]'),pop=v.querySelector('[data-pop]'),keep=v.querySelector('[data-keep]');
+ let running=false;
+ const set=on=>{running=on;seed.textContent=on?'Seeding…':'Seed…';if(v.id!=='v-c')seed.disabled=on;if(v.id==='v-a')stop.classList.toggle('hidden',!on);if(dock)dock.classList.toggle('hidden',!on);if(pop&&!on)pop.classList.add('hidden');};
+ seed.onclick=()=>{if(running){if(pop)pop.classList.toggle('hidden');return;}toast.style.display='none';set(true);};
+ stop.onclick=()=>{stop.disabled=true;stop.textContent='Stopping…';setTimeout(()=>{stop.disabled=false;stop.textContent=v.id==='v-b'?'Stop run':'Stop';set(false);toast.style.display='block';},600);};
+ if(keep)keep.onclick=()=>pop.classList.add('hidden');
+});
+</script></body></html>
