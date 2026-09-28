@@ -12,6 +12,7 @@ Run them with `make test-browser`.
 """
 
 import json
+import re
 import os
 import sqlite3
 import subprocess
@@ -25,6 +26,7 @@ from playwright.sync_api import expect, sync_playwright
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("SEEDORA_TEST_PORT", "7801"))
 BASE = f"http://{HOST}:{PORT}"
+AUTH = {}
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -69,6 +71,22 @@ def server():
         env={**os.environ, "BROWSER": "true", "DISPLAY": ""},
     )
 
+    # The server prints a link carrying this launch's access token; every
+    # request below presents it as a Bearer header.
+    token = None
+    for line in iter(proc.stdout.readline, b""):
+        m = re.search(rb"[?&]token=([\w-]+)", line)
+        if m:
+            token = m.group(1).decode()
+            break
+    if token is None:
+        proc.kill()
+        raise RuntimeError(f"server exited: {proc.stdout.read().decode()}")
+    AUTH["Authorization"] = f"Bearer {token}"
+    opener = urllib.request.build_opener()
+    opener.addheaders = list(AUTH.items())
+    urllib.request.install_opener(opener)
+
     for _ in range(100):
         try:
             urllib.request.urlopen(f"{BASE}/api/state", timeout=1)
@@ -102,7 +120,7 @@ def page(browser, server):
     around most of what it does, so an exception leaves the page half drawn and
     otherwise silent.
     """
-    context = browser.new_context(viewport={"width": 1600, "height": 1000})
+    context = browser.new_context(viewport={"width": 1600, "height": 1000}, extra_http_headers=AUTH)
     p = context.new_page()
     p.errors = []
     p.failures = []
@@ -306,7 +324,7 @@ def test_a_seeding_run_reports_progress_and_finishes(page):
 
 def test_the_page_is_usable_at_a_laptop_width(browser, server):
     """1280x800 is the smallest screen this is used on; it must not clip."""
-    context = browser.new_context(viewport={"width": 1280, "height": 800})
+    context = browser.new_context(viewport={"width": 1280, "height": 800}, extra_http_headers=AUTH)
     p = context.new_page()
     errors = []
     p.on("pageerror", lambda e: errors.append(str(e)))

@@ -31,6 +31,9 @@ it.
   `keep_password: false`. Query-parameter passwords are stripped too.
 - **Preview and Connect wait for a running seed.** They used the connection
   the run held, and their ROLLBACK could break the seed's transaction.
+- **A dry run on YugabyteDB writes nothing.** YugabyteDB commits a COPY in
+  batches outside the enclosing transaction, so the rollback left the rows in
+  place. Seedora now turns that batching off for its session.
 - **Text limits count characters, not bytes,** so multi-byte text is no longer
   cut mid-character or rejected by `varchar(n)`.
 

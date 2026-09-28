@@ -50,6 +50,15 @@ func open(ctx context.Context, dsn string) (db.Driver, error) {
 	var version string
 	if err := conn.QueryRow(ctx, "SELECT version()").Scan(&version); err == nil {
 		d.cockroach = strings.Contains(version, "CockroachDB")
+		// YugabyteDB commits a COPY in batches of its own, outside the
+		// enclosing transaction, so a rollback — a dry run, a failed seed —
+		// left the rows behind. Zero turns the batching off.
+		if strings.Contains(version, "-YB-") {
+			if _, err := conn.Exec(ctx, "SET yb_default_copy_from_rows_per_transaction = 0"); err != nil {
+				conn.Close(ctx)
+				return nil, fmt.Errorf("disable yugabyte copy batching: %w", err)
+			}
+		}
 	}
 	return d, nil
 }
