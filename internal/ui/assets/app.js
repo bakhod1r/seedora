@@ -3033,8 +3033,9 @@ function selfEdge(a, b, base, lit, hue, opts) {
   const y2 = fromScreen(b.top + b.height / 2 - base.top);
 
   // The loop widens with the gap between the two rows, so a reference across a
-  // tall card does not collapse into a flat line against its edge.
-  const out = 22 + Math.min(26, Math.abs(y2 - y1) * 0.4);
+  // tall card does not collapse into a flat line against its edge — but never
+  // past the corridor to the next column, or it runs under that column's card.
+  const out = Math.min(GAP_X - 6, 14 + Math.abs(y2 - y1) * 0.2);
 
   const d = roundedPath([
     { x, y: y1 },
