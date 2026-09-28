@@ -123,10 +123,20 @@ func (c *Config) Addr() string { return fmt.Sprintf("%s:%d", c.Host, c.Port) }
 // makes the header stop matching what they entered. String surgery touches only
 // the span that has to go.
 func Redacted(dsn string) string {
-	// No scheme means no credentials to hide: a SQLite path is the whole DSN
-	// and hiding it would leave the header saying nothing.
 	sep := strings.Index(dsn, "://")
 	if sep < 0 {
+		// MySQL's own `user:pass@tcp(host)/db` form has no scheme but does
+		// carry a password. Anything else without a scheme is a SQLite path,
+		// the whole DSN, and hiding it would leave the header saying nothing.
+		if user, _, has, rest, ok := SplitNativeMySQL(dsn); ok {
+			if q := strings.IndexAny(rest, "?#"); q >= 0 {
+				rest = rest[:q] // the query can name a password too
+			}
+			if has {
+				return user + ":****" + rest
+			}
+			return user + rest
+		}
 		return dsn
 	}
 	start := sep + 3
@@ -178,4 +188,26 @@ func readSecretFile(path string) (string, error) {
 		return "", fmt.Errorf("read DSN file %s: %w", path, err)
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// SplitNativeMySQL splits a DSN in MySQL's own scheme-less form,
+// `user:pass@tcp(host:3306)/db?params`, at its credentials. rest starts at the
+// '@'. ok is false for anything else. The split follows go-sql-driver/mysql:
+// the credentials end at the last '@' before the last '/', so a password may
+// itself contain '@' or ':'.
+func SplitNativeMySQL(dsn string) (user, password string, hasPassword bool, rest string, ok bool) {
+	if strings.Contains(dsn, "://") || !(strings.Contains(dsn, "@tcp(") || strings.Contains(dsn, "@unix(")) {
+		return "", "", false, "", false
+	}
+	slash := strings.LastIndexByte(dsn, '/')
+	if slash < 0 {
+		slash = len(dsn)
+	}
+	at := strings.LastIndexByte(dsn[:slash], '@')
+	if at < 0 {
+		return "", "", false, "", false
+	}
+	cred := dsn[:at]
+	user, password, hasPassword = strings.Cut(cred, ":")
+	return user, password, hasPassword, dsn[at:], true
 }

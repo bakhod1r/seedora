@@ -15,6 +15,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -212,6 +213,9 @@ func WithPassword(dsn, password string) (string, error) {
 	if password == "" {
 		return dsn, nil
 	}
+	if user, _, _, rest, ok := config.SplitNativeMySQL(dsn); ok {
+		return user + ":" + password + rest, nil
+	}
 	u, err := url.Parse(dsn)
 	if err != nil || u.Scheme == "" {
 		return "", fmt.Errorf("cannot add a password to this DSN — paste the full connection string instead")
@@ -224,28 +228,73 @@ func WithPassword(dsn, password string) (string, error) {
 	return u.String(), nil
 }
 
+// passwordParam reports whether a query parameter carries a password. Several
+// drivers accept one there (lib/pq and pgx take ?password=, others ?pwd=).
+func passwordParam(name string) bool {
+	switch strings.ToLower(name) {
+	case "password", "pwd", "pass", "passwd", "sslpassword":
+		return true
+	}
+	return false
+}
+
 // stripPassword removes the password from a DSN, reporting whether there was
-// one. A DSN that does not parse is returned unchanged: it is not Seedora's job
-// to rewrite a string it does not understand, and the caller stores it as-is
-// only when the user asked for that.
+// one — in the userinfo, in a password query parameter, or in MySQL's own
+// scheme-less form. A DSN that does not parse is returned unchanged: it is not
+// Seedora's job to rewrite a string it does not understand, and the caller
+// stores it as-is only when the user asked for that.
 func stripPassword(dsn string) (string, bool) {
+	if user, _, has, rest, ok := config.SplitNativeMySQL(dsn); ok {
+		return user + rest, has
+	}
 	u, err := url.Parse(dsn)
-	if err != nil || u.User == nil {
+	if err != nil || u.Scheme == "" {
 		return dsn, false
 	}
-	if _, ok := u.User.Password(); !ok {
+	had := false
+	if u.User != nil {
+		if _, ok := u.User.Password(); ok {
+			u.User = url.User(u.User.Username())
+			had = true
+		}
+	}
+	if u.RawQuery != "" {
+		q := u.Query()
+		for name := range q {
+			if passwordParam(name) {
+				q.Del(name)
+				had = true
+			}
+		}
+		if had {
+			u.RawQuery = q.Encode()
+		}
+	}
+	if !had {
 		return dsn, false
 	}
-	u.User = url.User(u.User.Username())
 	return u.String(), true
 }
 
 func passwordOf(dsn string) (string, bool) {
+	if _, pass, has, _, ok := config.SplitNativeMySQL(dsn); ok {
+		return pass, has
+	}
 	u, err := url.Parse(dsn)
-	if err != nil || u.User == nil {
+	if err != nil {
 		return "", false
 	}
-	return u.User.Password()
+	if u.User != nil {
+		if p, ok := u.User.Password(); ok {
+			return p, true
+		}
+	}
+	for name, v := range u.Query() {
+		if passwordParam(name) && len(v) > 0 {
+			return v[0], true
+		}
+	}
+	return "", false
 }
 
 // maskDSN replaces the password for display. It defers to the config package so
@@ -256,6 +305,27 @@ func maskDSN(dsn string) string { return config.Redacted(dsn) }
 // describe names a connection the way a person would: the database, then where
 // it lives.
 func describe(dsn string) string {
+	if _, _, _, rest, ok := config.SplitNativeMySQL(dsn); ok {
+		// rest is "@tcp(host:port)/db?params".
+		host := ""
+		if o, c := strings.IndexByte(rest, '('), strings.IndexByte(rest, ')'); o >= 0 && c > o {
+			host = rest[o+1 : c]
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+		}
+		name := ""
+		if slash := strings.LastIndexByte(rest, '/'); slash >= 0 {
+			name, _, _ = strings.Cut(rest[slash+1:], "?")
+		}
+		switch {
+		case name != "" && host != "":
+			return name + " on " + host
+		case name != "":
+			return name
+		}
+		return host
+	}
 	u, err := url.Parse(dsn)
 	if err != nil || u.Scheme == "" {
 		return filepath.Base(dsn)
